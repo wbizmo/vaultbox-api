@@ -5,6 +5,7 @@ const multipart = require("@fastify/multipart");
 const swagger = require("@fastify/swagger");
 const swaggerUi = require("@fastify/swagger-ui");
 
+const systemRoutes = require("./routes/system.routes");
 const authRoutes = require("./routes/auth.routes");
 const userRoutes = require("./routes/user.routes");
 
@@ -54,50 +55,7 @@ function buildApp() {
     routePrefix: "/docs"
   });
 
-  app.get("/", {
-    schema: {
-      tags: ["System"],
-      summary: "API welcome route",
-      response: {
-        200: {
-          type: "object",
-          properties: {
-            name: { type: "string" },
-            status: { type: "string" },
-            docs: { type: "string" }
-          }
-        }
-      }
-    }
-  }, async () => {
-    return {
-      name: "VaultBox API",
-      status: "running",
-      docs: "/docs"
-    };
-  });
-
-  app.get("/health", {
-    schema: {
-      tags: ["System"],
-      summary: "Health check",
-      response: {
-        200: {
-          type: "object",
-          properties: {
-            status: { type: "string" },
-            service: { type: "string" }
-          }
-        }
-      }
-    }
-  }, async () => {
-    return {
-      status: "ok",
-      service: "vaultbox-api"
-    };
-  });
-
+  app.register(systemRoutes);
   app.register(authRoutes);
   app.register(userRoutes);
 
