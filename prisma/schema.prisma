@@ -46,7 +46,7 @@ model Plan {
   id            String   @id @default(cuid())
   name          String   @unique
   priceMonthly  Int
-  storageLimit  Int
+  storageLimit  BigInt
   createdAt     DateTime @default(now())
 
   users         User[]
@@ -67,7 +67,7 @@ model File {
   originalName String
   storedName   String
   mimeType     String
-  size         Int
+  size         BigInt
   path         String
   checksum     String?
   status       FileStatus @default(ACTIVE)

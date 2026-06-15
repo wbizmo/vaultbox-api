@@ -4,7 +4,9 @@
   "description": "Secure cloud storage API with user accounts, plan-based quotas, signed downloads, suspension logic, audit logs, and admin controls.",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "nodemon src/server.js",
+    "start": "node src/server.js"
   },
   "keywords": [],
   "author": "",
