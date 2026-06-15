@@ -10,6 +10,7 @@ const authRoutes = require("./routes/auth.routes");
 const userRoutes = require("./routes/user.routes");
 const planRoutes = require("./routes/plan.routes");
 const fileRoutes = require("./routes/file.routes");
+const downloadRoutes = require("./routes/download.routes");
 
 function buildApp() {
   const app = Fastify({
@@ -54,7 +55,8 @@ function buildApp() {
         { name: "Auth", description: "Authentication endpoints" },
         { name: "User", description: "Current user endpoints" },
         { name: "Plans", description: "Storage plans and quota management" },
-        { name: "Files", description: "File upload, listing and deletion" }
+        { name: "Files", description: "File upload, listing and deletion" },
+        { name: "Downloads", description: "Signed download token generation and secure file retrieval" }
       ]
     }
   });
@@ -68,6 +70,7 @@ function buildApp() {
   app.register(userRoutes);
   app.register(planRoutes);
   app.register(fileRoutes);
+  app.register(downloadRoutes);
 
   return app;
 }
