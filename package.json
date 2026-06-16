@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
-    "build": "prisma generate",
-    "deploy:migrate": "prisma migrate deploy",
+    "build": "./node_modules/prisma/build/index.js generate",
+    "deploy:migrate": "./node_modules/prisma/build/index.js migrate deploy",
     "seed": "node prisma/seed.js"
   },
   "keywords": [
