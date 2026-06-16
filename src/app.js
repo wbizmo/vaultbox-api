@@ -12,6 +12,7 @@ const planRoutes = require("./routes/plan.routes");
 const fileRoutes = require("./routes/file.routes");
 const downloadRoutes = require("./routes/download.routes");
 const adminRoutes = require("./routes/admin.routes");
+const billingRoutes = require("./routes/billing.routes");
 
 function buildApp() {
   const app = Fastify({
@@ -58,7 +59,8 @@ function buildApp() {
         { name: "Plans", description: "Storage plans and quota management" },
         { name: "Files", description: "File upload, listing and deletion" },
         { name: "Downloads", description: "Signed download token generation and secure file retrieval" },
-        { name: "Admin", description: "Admin user management and platform reports" }
+        { name: "Billing", description: "Billing simulation and payment status workflows" },
+        { name: "Admin", description: "Admin user management, audit logs and platform reports" }
       ]
     }
   });
@@ -73,6 +75,7 @@ function buildApp() {
   app.register(planRoutes);
   app.register(fileRoutes);
   app.register(downloadRoutes);
+  app.register(billingRoutes);
   app.register(adminRoutes);
 
   return app;

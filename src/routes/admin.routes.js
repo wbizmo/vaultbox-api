@@ -77,9 +77,7 @@ async function adminRoutes(app) {
       return reply.code(400).send({ message: "You cannot suspend your own account" });
     }
 
-    const user = await prisma.user.findUnique({
-      where: { id }
-    });
+    const user = await prisma.user.findUnique({ where: { id } });
 
     if (!user) {
       return reply.code(404).send({ message: "User not found" });
@@ -129,9 +127,7 @@ async function adminRoutes(app) {
   }, async (request, reply) => {
     const { id } = request.params;
 
-    const user = await prisma.user.findUnique({
-      where: { id }
-    });
+    const user = await prisma.user.findUnique({ where: { id } });
 
     if (!user) {
       return reply.code(404).send({ message: "User not found" });
@@ -185,9 +181,7 @@ async function adminRoutes(app) {
       return reply.code(400).send({ message: "You cannot delete your own account" });
     }
 
-    const user = await prisma.user.findUnique({
-      where: { id }
-    });
+    const user = await prisma.user.findUnique({ where: { id } });
 
     if (!user) {
       return reply.code(404).send({ message: "User not found" });
@@ -243,6 +237,52 @@ async function adminRoutes(app) {
       deletedUsers: users.filter((user) => user.status === "DELETED").length,
       totalStorageUsed: totalStorageUsed.toString(),
       totalStorageUsedFormatted: formatBytes(totalStorageUsed)
+    };
+  });
+
+  app.get("/admin/audit-logs", {
+    preHandler: [requireAuth, requireAdmin],
+    schema: {
+      tags: ["Admin"],
+      summary: "View audit logs",
+      security: [{ bearerAuth: [] }],
+      querystring: {
+        type: "object",
+        properties: {
+          limit: { type: "integer", minimum: 1, maximum: 100 },
+          action: { type: "string" }
+        }
+      }
+    }
+  }, async (request) => {
+    const limit = Number(request.query.limit || 50);
+    const action = request.query.action;
+
+    const logs = await prisma.auditLog.findMany({
+      where: action ? { action } : {},
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            role: true
+          }
+        }
+      },
+      orderBy: { createdAt: "desc" },
+      take: limit
+    });
+
+    return {
+      logs: logs.map((log) => ({
+        id: log.id,
+        action: log.action,
+        details: log.details,
+        ip: log.ip,
+        createdAt: log.createdAt,
+        user: log.user
+      }))
     };
   });
 }
