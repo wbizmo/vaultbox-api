@@ -4,11 +4,9 @@ const { requireAdmin } = require("../middleware/admin");
 
 function formatBytes(bytes) {
   const value = Number(bytes);
-
   if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(2)} GB`;
   if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(2)} MB`;
   if (value >= 1024) return `${(value / 1024).toFixed(2)} KB`;
-
   return `${value} B`;
 }
 
@@ -58,9 +56,7 @@ async function adminRoutes(app) {
       params: {
         type: "object",
         required: ["id"],
-        properties: {
-          id: { type: "string" }
-        }
+        properties: { id: { type: "string" } }
       },
       body: {
         type: "object",
@@ -78,21 +74,12 @@ async function adminRoutes(app) {
     }
 
     const user = await prisma.user.findUnique({ where: { id } });
-
-    if (!user) {
-      return reply.code(404).send({ message: "User not found" });
-    }
+    if (!user) return reply.code(404).send({ message: "User not found" });
 
     const updatedUser = await prisma.user.update({
       where: { id },
       data: { status: "SUSPENDED" },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        status: true
-      }
+      select: { id: true, name: true, email: true, role: true, status: true }
     });
 
     await prisma.auditLog.create({
@@ -104,10 +91,7 @@ async function adminRoutes(app) {
       }
     });
 
-    return {
-      message: "User suspended successfully",
-      user: updatedUser
-    };
+    return { message: "User suspended successfully", user: updatedUser };
   });
 
   app.patch("/admin/users/:id/reactivate", {
@@ -119,30 +103,19 @@ async function adminRoutes(app) {
       params: {
         type: "object",
         required: ["id"],
-        properties: {
-          id: { type: "string" }
-        }
+        properties: { id: { type: "string" } }
       }
     }
   }, async (request, reply) => {
     const { id } = request.params;
 
     const user = await prisma.user.findUnique({ where: { id } });
-
-    if (!user) {
-      return reply.code(404).send({ message: "User not found" });
-    }
+    if (!user) return reply.code(404).send({ message: "User not found" });
 
     const updatedUser = await prisma.user.update({
       where: { id },
       data: { status: "ACTIVE" },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        status: true
-      }
+      select: { id: true, name: true, email: true, role: true, status: true }
     });
 
     await prisma.auditLog.create({
@@ -154,10 +127,7 @@ async function adminRoutes(app) {
       }
     });
 
-    return {
-      message: "User reactivated successfully",
-      user: updatedUser
-    };
+    return { message: "User reactivated successfully", user: updatedUser };
   });
 
   app.delete("/admin/users/:id", {
@@ -169,9 +139,7 @@ async function adminRoutes(app) {
       params: {
         type: "object",
         required: ["id"],
-        properties: {
-          id: { type: "string" }
-        }
+        properties: { id: { type: "string" } }
       }
     }
   }, async (request, reply) => {
@@ -182,21 +150,12 @@ async function adminRoutes(app) {
     }
 
     const user = await prisma.user.findUnique({ where: { id } });
-
-    if (!user) {
-      return reply.code(404).send({ message: "User not found" });
-    }
+    if (!user) return reply.code(404).send({ message: "User not found" });
 
     const deletedUser = await prisma.user.update({
       where: { id },
       data: { status: "DELETED" },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        status: true
-      }
+      select: { id: true, name: true, email: true, role: true, status: true }
     });
 
     await prisma.auditLog.create({
@@ -208,10 +167,7 @@ async function adminRoutes(app) {
       }
     });
 
-    return {
-      message: "User deleted successfully",
-      user: deletedUser
-    };
+    return { message: "User deleted successfully", user: deletedUser };
   });
 
   app.get("/admin/storage-report", {
@@ -222,9 +178,7 @@ async function adminRoutes(app) {
       security: [{ bearerAuth: [] }]
     }
   }, async () => {
-    const users = await prisma.user.findMany({
-      include: { plan: true }
-    });
+    const users = await prisma.user.findMany({ include: { plan: true } });
 
     const totalStorageUsed = users.reduce((sum, user) => {
       return sum + BigInt(user.storageUsed);
@@ -262,12 +216,7 @@ async function adminRoutes(app) {
       where: action ? { action } : {},
       include: {
         user: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-            role: true
-          }
+          select: { id: true, name: true, email: true, role: true }
         }
       },
       orderBy: { createdAt: "desc" },

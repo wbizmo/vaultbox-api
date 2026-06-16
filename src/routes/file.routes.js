@@ -10,11 +10,9 @@ const uploadDir = path.join(process.cwd(), "storage", "uploads");
 
 function formatBytes(bytes) {
   const value = Number(bytes);
-
   if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(2)} GB`;
   if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(2)} MB`;
   if (value >= 1024) return `${(value / 1024).toFixed(2)} KB`;
-
   return `${value} B`;
 }
 
@@ -28,8 +26,37 @@ async function fileRoutes(app) {
     schema: {
       tags: ["Files"],
       summary: "Upload a file with quota enforcement",
+      security: [{ bearerAuth: [] }],
       consumes: ["multipart/form-data"],
-      security: [{ bearerAuth: [] }]
+      response: {
+        201: {
+          type: "object",
+          properties: {
+            message: { type: "string" },
+            file: {
+              type: "object",
+              properties: {
+                id: { type: "string" },
+                originalName: { type: "string" },
+                mimeType: { type: "string" },
+                size: { type: "string" },
+                sizeFormatted: { type: "string" },
+                checksum: { type: "string" },
+                createdAt: { type: "string" }
+              }
+            },
+            quota: {
+              type: "object",
+              properties: {
+                storageUsed: { type: "string" },
+                storageLimit: { type: "string" },
+                storageUsedFormatted: { type: "string" },
+                storageLimitFormatted: { type: "string" }
+              }
+            }
+          }
+        }
+      }
     }
   }, async (request, reply) => {
     await ensureUploadDir();
@@ -92,9 +119,7 @@ async function fileRoutes(app) {
 
     await prisma.user.update({
       where: { id: user.id },
-      data: {
-        storageUsed: nextUsage
-      }
+      data: { storageUsed: nextUsage }
     });
 
     await prisma.auditLog.create({
@@ -131,7 +156,29 @@ async function fileRoutes(app) {
     schema: {
       tags: ["Files"],
       summary: "List current user's files",
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }],
+      response: {
+        200: {
+          type: "object",
+          properties: {
+            files: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  id: { type: "string" },
+                  originalName: { type: "string" },
+                  mimeType: { type: "string" },
+                  size: { type: "string" },
+                  sizeFormatted: { type: "string" },
+                  checksum: { type: "string" },
+                  createdAt: { type: "string" }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }, async (request) => {
     const files = await prisma.file.findMany({
@@ -166,6 +213,14 @@ async function fileRoutes(app) {
         required: ["id"],
         properties: {
           id: { type: "string" }
+        }
+      },
+      response: {
+        200: {
+          type: "object",
+          properties: {
+            message: { type: "string" }
+          }
         }
       }
     }
@@ -213,9 +268,7 @@ async function fileRoutes(app) {
       }
     });
 
-    return {
-      message: "File deleted successfully"
-    };
+    return { message: "File deleted successfully" };
   });
 }
 
