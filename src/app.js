@@ -14,6 +14,7 @@ const folderRoutes = require("./routes/folder.routes");
 const downloadRoutes = require("./routes/download.routes");
 const billingRoutes = require("./routes/billing.routes");
 const adminRoutes = require("./routes/admin.routes");
+const infraRoutes = require("./routes/infra.routes");
 
 function buildApp() {
   const app = Fastify({
@@ -54,15 +55,16 @@ function buildApp() {
         }
       },
       tags: [
-        { name: "System", description: "System endpoints" },
-        { name: "Auth", description: "Authentication" },
-        { name: "User", description: "Current user" },
-        { name: "Plans", description: "Plans and quotas" },
-        { name: "Files", description: "Files" },
-        { name: "Folders", description: "Folders" },
-        { name: "Downloads", description: "Signed downloads" },
-        { name: "Billing", description: "Billing simulation" },
-        { name: "Admin", description: "Admin tools" }
+        { name: "System", description: "System and health endpoints" },
+        { name: "Auth", description: "Authentication endpoints" },
+        { name: "User", description: "Current user endpoints" },
+        { name: "Plans", description: "Storage plans and quota management" },
+        { name: "Files", description: "File upload, listing and deletion" },
+        { name: "Folders", description: "Folder organization endpoints" },
+        { name: "Downloads", description: "Signed download token generation and secure file retrieval" },
+        { name: "Billing", description: "Billing simulation and suspension workflow" },
+        { name: "Admin", description: "Admin user management, audit logs and platform reports" },
+        { name: "Infrastructure", description: "Database and Redis monitoring" }
       ]
     }
   });
@@ -80,6 +82,7 @@ function buildApp() {
   app.register(downloadRoutes);
   app.register(billingRoutes);
   app.register(adminRoutes);
+  app.register(infraRoutes);
 
   return app;
 }
