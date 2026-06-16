@@ -7,7 +7,24 @@ async function billingRoutes(app) {
     schema: {
       tags: ["Billing"],
       summary: "Simulate failed payment and suspend account",
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }],
+      response: {
+        200: {
+          type: "object",
+          properties: {
+            message: { type: "string" },
+            user: {
+              type: "object",
+              properties: {
+                id: { type: "string" },
+                name: { type: "string" },
+                email: { type: "string" },
+                status: { type: "string" }
+              }
+            }
+          }
+        }
+      }
     }
   }, async (request) => {
     const user = await prisma.user.update({

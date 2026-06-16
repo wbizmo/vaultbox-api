@@ -24,10 +24,7 @@ async function folderRoutes(app) {
       }
     });
 
-    return reply.code(201).send({
-      message: "Folder created successfully",
-      folder
-    });
+    return reply.code(201).send({ message: "Folder created successfully", folder });
   });
 
   app.get("/folders", {
@@ -39,24 +36,12 @@ async function folderRoutes(app) {
     }
   }, async (request) => {
     const folders = await prisma.folder.findMany({
-      where: {
-        userId: request.user.id
-      },
-      include: {
-        _count: {
-          select: {
-            files: true
-          }
-        }
-      },
-      orderBy: {
-        createdAt: "desc"
-      }
+      where: { userId: request.user.id },
+      include: { _count: { select: { files: true } } },
+      orderBy: { createdAt: "desc" }
     });
 
-    return {
-      folders
-    };
+    return { folders };
   });
 
   app.patch("/folders/:id", {
@@ -64,7 +49,21 @@ async function folderRoutes(app) {
     schema: {
       tags: ["Folders"],
       summary: "Rename folder",
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }],
+      params: {
+        type: "object",
+        required: ["id"],
+        properties: {
+          id: { type: "string" }
+        }
+      },
+      body: {
+        type: "object",
+        required: ["name"],
+        properties: {
+          name: { type: "string" }
+        }
+      }
     }
   }, async (request, reply) => {
     const folder = await prisma.folder.findFirst({
@@ -74,25 +73,14 @@ async function folderRoutes(app) {
       }
     });
 
-    if (!folder) {
-      return reply.code(404).send({
-        message: "Folder not found"
-      });
-    }
+    if (!folder) return reply.code(404).send({ message: "Folder not found" });
 
     const updatedFolder = await prisma.folder.update({
-      where: {
-        id: folder.id
-      },
-      data: {
-        name: request.body.name
-      }
+      where: { id: folder.id },
+      data: { name: request.body.name }
     });
 
-    return {
-      message: "Folder renamed successfully",
-      folder: updatedFolder
-    };
+    return { message: "Folder renamed successfully", folder: updatedFolder };
   });
 
   app.delete("/folders/:id", {
@@ -100,7 +88,14 @@ async function folderRoutes(app) {
     schema: {
       tags: ["Folders"],
       summary: "Delete folder",
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }],
+      params: {
+        type: "object",
+        required: ["id"],
+        properties: {
+          id: { type: "string" }
+        }
+      }
     }
   }, async (request, reply) => {
     const folder = await prisma.folder.findFirst({
@@ -110,21 +105,11 @@ async function folderRoutes(app) {
       }
     });
 
-    if (!folder) {
-      return reply.code(404).send({
-        message: "Folder not found"
-      });
-    }
+    if (!folder) return reply.code(404).send({ message: "Folder not found" });
 
-    await prisma.folder.delete({
-      where: {
-        id: folder.id
-      }
-    });
+    await prisma.folder.delete({ where: { id: folder.id } });
 
-    return {
-      message: "Folder deleted successfully"
-    };
+    return { message: "Folder deleted successfully" };
   });
 }
 

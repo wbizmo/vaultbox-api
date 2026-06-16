@@ -18,6 +18,17 @@ async function downloadRoutes(app) {
         properties: {
           id: { type: "string" }
         }
+      },
+      response: {
+        200: {
+          type: "object",
+          properties: {
+            message: { type: "string" },
+            token: { type: "string" },
+            expiresAt: { type: "string" },
+            downloadUrl: { type: "string" }
+          }
+        }
       }
     }
   }, async (request, reply) => {
@@ -29,13 +40,9 @@ async function downloadRoutes(app) {
       }
     });
 
-    if (!file) {
-      return reply.code(404).send({ message: "File not found" });
-    }
+    if (!file) return reply.code(404).send({ message: "File not found" });
 
-    const user = await prisma.user.findUnique({
-      where: { id: request.user.id }
-    });
+    const user = await prisma.user.findUnique({ where: { id: request.user.id } });
 
     if (!user || user.status !== "ACTIVE") {
       return reply.code(403).send({ message: "Account is not active" });
@@ -86,35 +93,15 @@ async function downloadRoutes(app) {
   }, async (request, reply) => {
     const record = await prisma.downloadToken.findUnique({
       where: { token: request.params.token },
-      include: {
-        file: true,
-        user: true
-      }
+      include: { file: true, user: true }
     });
 
-    if (!record) {
-      return reply.code(404).send({ message: "Invalid download token" });
-    }
-
-    if (record.usedAt) {
-      return reply.code(410).send({ message: "Download token has already been used" });
-    }
-
-    if (record.expiresAt < new Date()) {
-      return reply.code(410).send({ message: "Download token has expired" });
-    }
-
-    if (record.user.status !== "ACTIVE") {
-      return reply.code(403).send({ message: "Account is not active" });
-    }
-
-    if (record.file.status !== "ACTIVE") {
-      return reply.code(404).send({ message: "File no longer exists" });
-    }
-
-    if (!fs.existsSync(record.file.path)) {
-      return reply.code(404).send({ message: "Stored file missing" });
-    }
+    if (!record) return reply.code(404).send({ message: "Invalid download token" });
+    if (record.usedAt) return reply.code(410).send({ message: "Download token has already been used" });
+    if (record.expiresAt < new Date()) return reply.code(410).send({ message: "Download token has expired" });
+    if (record.user.status !== "ACTIVE") return reply.code(403).send({ message: "Account is not active" });
+    if (record.file.status !== "ACTIVE") return reply.code(404).send({ message: "File no longer exists" });
+    if (!fs.existsSync(record.file.path)) return reply.code(404).send({ message: "Stored file missing" });
 
     await prisma.downloadToken.update({
       where: { id: record.id },
