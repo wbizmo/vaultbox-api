@@ -2,15 +2,28 @@
   "name": "vaultbox-api",
   "version": "1.0.0",
   "description": "Secure cloud storage API with user accounts, plan-based quotas, signed downloads, suspension logic, audit logs, and admin controls.",
-  "main": "index.js",
+  "main": "src/server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "nodemon src/server.js",
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "build": "npx prisma generate",
+    "deploy:migrate": "npx prisma migrate deploy",
+    "seed": "node prisma/seed.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "cloud-storage",
+    "file-storage",
+    "fastify",
+    "prisma",
+    "postgresql",
+    "redis",
+    "jwt",
+    "swagger",
+    "api",
+    "saas"
+  ],
+  "author": "Williams Ashibuogwu",
+  "license": "MIT",
   "dependencies": {
     "@fastify/cors": "^11.2.0",
     "@fastify/jwt": "^10.1.0",
