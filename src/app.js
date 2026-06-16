@@ -4,6 +4,7 @@ const jwt = require("@fastify/jwt");
 const multipart = require("@fastify/multipart");
 const swagger = require("@fastify/swagger");
 const swaggerUi = require("@fastify/swagger-ui");
+const rateLimit = require("@fastify/rate-limit");
 
 const systemRoutes = require("./routes/system.routes");
 const authRoutes = require("./routes/auth.routes");
@@ -17,12 +18,16 @@ const adminRoutes = require("./routes/admin.routes");
 const infraRoutes = require("./routes/infra.routes");
 
 function buildApp() {
-  const app = Fastify({
-    logger: true
-  });
+  const app = Fastify({ logger: true });
 
-  app.register(cors, {
-    origin: true
+  app.register(cors, { origin: true });
+
+  app.register(rateLimit, {
+    max: 120,
+    timeWindow: "1 minute",
+    keyGenerator: (request) => {
+      return request.user?.id || request.ip;
+    }
   });
 
   app.register(jwt, {
