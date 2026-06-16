@@ -6,6 +6,58 @@ The platform provides user accounts, storage plans, quota enforcement, file uplo
 
 ---
 
+## Live Demo
+
+### Base URL
+
+```text
+https://vaultbox-api-ucff.onrender.com
+```
+
+### Important
+
+The live deployment is hosted on Render's free tier.
+
+If the API has been inactive for some time, Render may temporarily put the service to sleep.
+
+Before testing any API endpoints:
+
+1. Visit:
+
+```text
+https://vaultbox-api-ucff.onrender.com
+```
+
+2. Wait a few seconds for the service to wake up.
+
+3. Open Swagger or begin testing endpoints.
+
+Once awake, all endpoints function normally.
+
+---
+
+## Live API Documentation
+
+Swagger UI:
+
+```text
+https://vaultbox-api-ucff.onrender.com/docs
+```
+
+Application Health:
+
+```text
+https://vaultbox-api-ucff.onrender.com/health
+```
+
+Infrastructure Health:
+
+```text
+https://vaultbox-api-ucff.onrender.com/infra/health
+```
+
+---
+
 ## Features
 
 ### Authentication & Authorization
@@ -102,7 +154,7 @@ Core modules include:
 * Audit Logging
 * Infrastructure Monitoring
 
-Data is stored in PostgreSQL through Prisma ORM while Redis provides infrastructure services such as caching and rate limiting.
+Data is stored in PostgreSQL through Prisma ORM while Redis provides infrastructure services such as caching, rate limiting, and operational support.
 
 ---
 
@@ -137,12 +189,13 @@ Data is stored in PostgreSQL through Prisma ORM while Redis provides infrastruct
 ### Development
 
 * Replit
+* Render
 
 ---
 
 ## Project Structure
 
-```
+```text
 vaultbox-api/
 │
 ├── prisma/
@@ -202,7 +255,7 @@ The database seeder automatically creates two accounts for testing.
 
 ### Administrator
 
-```
+```text
 Email: admin@vaultbox.dev
 Password: Admin123!
 ```
@@ -215,11 +268,11 @@ Administrator capabilities:
 * Delete users
 * View audit logs
 * View storage reports
-* Access all administrative endpoints
+* Access administrative endpoints
 
 ### Standard User
 
-```
+```text
 Email: user@vaultbox.dev
 Password: User123!
 ```
@@ -242,7 +295,7 @@ Standard user capabilities:
 
 ### Authentication
 
-```
+```text
 POST /auth/register
 POST /auth/login
 GET  /me
@@ -250,7 +303,7 @@ GET  /me
 
 ### Plans
 
-```
+```text
 GET   /plans
 GET   /quota
 PATCH /plans/:planId/subscribe
@@ -258,7 +311,7 @@ PATCH /plans/:planId/subscribe
 
 ### Folders
 
-```
+```text
 POST   /folders
 GET    /folders
 PATCH  /folders/:id
@@ -267,7 +320,7 @@ DELETE /folders/:id
 
 ### Files
 
-```
+```text
 POST   /files/upload
 GET    /files
 DELETE /files/:id
@@ -275,20 +328,20 @@ DELETE /files/:id
 
 ### Downloads
 
-```
+```text
 POST /files/:id/download-token
 GET  /download/:token
 ```
 
 ### Billing
 
-```
+```text
 POST /billing/simulate-failed-payment
 ```
 
 ### Administration
 
-```
+```text
 GET    /admin/users
 PATCH  /admin/users/:id/suspend
 PATCH  /admin/users/:id/reactivate
@@ -300,27 +353,30 @@ GET    /admin/audit-logs
 
 ### Infrastructure
 
-```
+```text
 GET /health
 GET /infra/health
 ```
 
 ### Documentation
 
-```
+```text
 GET /docs
 ```
-
----
-
 ## API Documentation
 
 Interactive API documentation is available through Swagger UI.
 
-Open:
+### Local Development
 
-```
+```text
 http://localhost:4000/docs
+```
+
+### Live Deployment
+
+```text
+https://vaultbox-api-ucff.onrender.com/docs
 ```
 
 Swagger provides:
@@ -338,45 +394,87 @@ All available API functionality can be explored directly through the Swagger int
 
 ## Testing the API
 
-1. Seed the database:
+### Local Development
 
-   ```
-   node prisma/seed.js
-   ```
+1. Run database migrations:
 
-2. Start the application:
+```bash
+npx prisma migrate deploy
+```
 
-   ```
-   npm run dev
-   ```
+2. Seed demo data:
 
-3. Open Swagger:
+```bash
+node prisma/seed.js
+```
 
-   ```
-   http://localhost:4000/docs
-   ```
+3. Start the server:
 
-4. Login using either:
+```bash
+npm run dev
+```
 
-   ```
-   admin@vaultbox.dev
-   Admin123!
-   ```
+4. Open Swagger:
 
-   or
+```text
+http://localhost:4000/docs
+```
 
-   ```
-   user@vaultbox.dev
-   User123!
-   ```
+5. Login using either:
 
-5. Copy the JWT token returned from login.
+```text
+admin@vaultbox.dev
+Admin123!
+```
 
-6. Click the "Authorize" button in Swagger.
+or
 
-7. Paste the JWT token.
+```text
+user@vaultbox.dev
+User123!
+```
 
-8. Test protected endpoints directly from Swagger UI.
+6. Copy the JWT token returned from login.
+
+7. Click the Authorize button in Swagger.
+
+8. Paste the JWT token.
+
+9. Test protected endpoints.
+
+---
+
+### Testing the Live Deployment
+
+Before testing, visit:
+
+```text
+https://vaultbox-api-ucff.onrender.com
+```
+
+This ensures the service is awake if Render has suspended the free-tier instance due to inactivity.
+
+Then open:
+
+```text
+https://vaultbox-api-ucff.onrender.com/docs
+```
+
+Login using:
+
+```text
+admin@vaultbox.dev
+Admin123!
+```
+
+or
+
+```text
+user@vaultbox.dev
+User123!
+```
+
+Copy the returned JWT token and use Swagger's Authorize button to test protected routes.
 
 ---
 
@@ -384,49 +482,49 @@ All available API functionality can be explored directly through the Swagger int
 
 Clone the repository:
 
-```
+```bash
 git clone https://github.com/wbizmo/vaultbox-api.git
 ```
 
 Move into the project directory:
 
-```
+```bash
 cd vaultbox-api
 ```
 
 Install dependencies:
 
-```
+```bash
 npm install
 ```
 
 Create an environment file:
 
-```
+```bash
 cp .env.example .env
 ```
 
-Generate Prisma client:
+Generate Prisma Client:
 
-```
+```bash
 npx prisma generate
 ```
 
-Run database migrations:
+Run migrations:
 
-```
+```bash
 npx prisma migrate deploy
 ```
 
 Seed demo data:
 
-```
+```bash
 node prisma/seed.js
 ```
 
-Start the development server:
+Start development server:
 
-```
+```bash
 npm run dev
 ```
 
@@ -434,7 +532,7 @@ npm run dev
 
 ## Environment Variables
 
-```
+```env
 PORT=4000
 NODE_ENV=development
 
@@ -460,49 +558,173 @@ Recommended hosted services:
 
 ### Database
 
+```text
 Neon PostgreSQL
+```
 
 ### Redis
 
+```text
 Upstash Redis
+```
 
-Use:
+---
 
-* DATABASE_URL for the pooled PostgreSQL connection.
-* DIRECT_URL for Prisma migrations.
+## Neon PostgreSQL Configuration
+
+Use the pooled connection for application traffic:
+
+```env
+DATABASE_URL=postgresql://username:password@project-pooler.region.aws.neon.tech/database?sslmode=require
+```
+
+For migrations, use the direct connection:
+
+```env
+DIRECT_URL=postgresql://username:password@project.region.aws.neon.tech/database?sslmode=require
+```
+
+VaultBox has been tested successfully with Neon PostgreSQL in production.
+
+---
+
+## Upstash Redis Configuration
+
+Use the TLS-enabled Redis URL:
+
+```env
+REDIS_URL=rediss://default:password@your-upstash-instance.upstash.io:6379
+```
+
+The `rediss://` protocol is required for secure connections.
+
+VaultBox has been tested successfully with Upstash Redis in production.
+
+---
+
+## Render Deployment
+
+VaultBox can be deployed on:
+
+* Render
+* Railway
+* Fly.io
+* VPS environments
+* Docker hosts
+* Any Node.js-compatible hosting platform
+
+### Environment Variables
+
+Configure the following variables in your hosting provider:
+
+```env
+DATABASE_URL=
+DIRECT_URL=
+
+REDIS_URL=
+
+JWT_SECRET=
+JWT_EXPIRES_IN=7d
+
+APP_URL=
+
+DOWNLOAD_TOKEN_EXPIRES_MINUTES=5
+```
+
+### Render Build Command
+
+```bash
+rm -rf node_modules package-lock.json && npm install --omit=dev
+```
+
+### Render Start Command
+
+```bash
+npm start
+```
+
+### After Deployment
+
+Apply migrations:
+
+```bash
+npx prisma migrate deploy
+```
+
+Seed demo accounts:
+
+```bash
+node prisma/seed.js
+```
 
 ---
 
 ## Development Workflow
 
-Generate Prisma client:
+Generate Prisma Client:
 
-```
+```bash
 npx prisma generate
 ```
 
-Create migrations:
+Create a migration:
 
-```
-npx prisma migrate dev
+```bash
+npx prisma migrate dev --name migration_name
 ```
 
 Apply migrations:
 
-```
+```bash
 npx prisma migrate deploy
 ```
 
-Seed database:
+Seed demo data:
 
-```
+```bash
 node prisma/seed.js
 ```
 
 Start development server:
 
-```
+```bash
 npm run dev
+```
+
+---
+
+## Production Deployment Notes
+
+Production deployment has been validated using:
+
+* Render
+* Neon PostgreSQL
+* Upstash Redis
+
+Verified functionality includes:
+
+* User registration
+* User login
+* JWT authentication
+* Protected routes
+* Plan subscriptions
+* Folder management
+* Storage quota tracking
+* Swagger documentation
+* PostgreSQL connectivity
+* Redis connectivity
+* Health monitoring endpoints
+
+Live deployment:
+
+```text
+https://vaultbox-api-ucff.onrender.com
+```
+
+Swagger documentation:
+
+```text
+https://vaultbox-api-ucff.onrender.com/docs
 ```
 
 ---
@@ -513,8 +735,20 @@ Williams Ashibuogwu
 
 GitHub
 
-```
+```text
 https://github.com/wbizmo
+```
+
+LinkedIn
+
+```text
+https://linkedin.com/in/wbizmo
+```
+
+Portfolio
+
+```text
+https://my-portfolio-website-three-ebon.vercel.app
 ```
 
 ---
@@ -522,3 +756,7 @@ https://github.com/wbizmo
 ## License
 
 MIT License
+
+Copyright (c) Williams Ashibuogwu
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software.
