@@ -517,12 +517,6 @@ GitHub
 https://github.com/wbizmo
 ```
 
-Email
-
-```
-wbizmo@gmail.com
-```
-
 ---
 
 ## License
