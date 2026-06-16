@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
-    "build": "npx --yes prisma@6.15.0 generate",
-    "deploy:migrate": "npx --yes prisma@6.15.0 migrate deploy",
+    "build": "prisma generate",
+    "deploy:migrate": "prisma migrate deploy",
     "seed": "node prisma/seed.js"
   },
   "keywords": [
@@ -24,6 +24,10 @@
   ],
   "author": "Williams Ashibuogwu",
   "license": "MIT",
+  "engines": {
+    "node": "20.x",
+    "npm": "10.x"
+  },
   "dependencies": {
     "@fastify/cors": "^11.2.0",
     "@fastify/jwt": "^10.1.0",
@@ -42,9 +46,5 @@
   },
   "devDependencies": {
     "nodemon": "^3.1.14"
-  },
-  "engines": {
-    "node": "20.x",
-    "npm": "10.x"
   }
 }
