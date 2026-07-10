@@ -24,32 +24,32 @@ enum FileStatus {
 }
 
 model User {
-  id           String     @id @default(cuid())
-  name         String
-  email        String     @unique
-  password     String
-  role         UserRole   @default(USER)
-  status       UserStatus @default(ACTIVE)
-  planId       String?
-  storageUsed  Int        @default(0)
-  createdAt    DateTime   @default(now())
-  updatedAt    DateTime   @updatedAt
+  id          String     @id @default(cuid())
+  name        String
+  email       String     @unique
+  password    String
+  role        UserRole   @default(USER)
+  status      UserStatus @default(ACTIVE)
+  planId      String?
+  storageUsed BigInt     @default(0)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
 
-  plan         Plan?      @relation(fields: [planId], references: [id])
-  files        File[]
-  folders      Folder[]
-  tokens       DownloadToken[]
-  auditLogs    AuditLog[]
+  plan      Plan?           @relation(fields: [planId], references: [id])
+  files     File[]
+  folders   Folder[]
+  tokens    DownloadToken[]
+  auditLogs AuditLog[]
 }
 
 model Plan {
-  id            String   @id @default(cuid())
-  name          String   @unique
-  priceMonthly  Int
-  storageLimit  BigInt
-  createdAt     DateTime @default(now())
+  id           String   @id @default(cuid())
+  name         String   @unique
+  priceMonthly Int
+  storageLimit BigInt
+  createdAt    DateTime @default(now())
 
-  users         User[]
+  users User[]
 }
 
 model Folder {
@@ -58,8 +58,8 @@ model Folder {
   userId    String
   createdAt DateTime @default(now())
 
-  user      User     @relation(fields: [userId], references: [id])
-  files     File[]
+  user  User   @relation(fields: [userId], references: [id])
+  files File[]
 }
 
 model File {
@@ -76,22 +76,22 @@ model File {
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 
-  user         User       @relation(fields: [userId], references: [id])
-  folder       Folder?    @relation(fields: [folderId], references: [id])
-  tokens       DownloadToken[]
+  user   User            @relation(fields: [userId], references: [id])
+  folder Folder?         @relation(fields: [folderId], references: [id])
+  tokens DownloadToken[]
 }
 
 model DownloadToken {
-  id        String   @id @default(cuid())
-  token     String   @unique
+  id        String    @id @default(cuid())
+  token     String    @unique
   fileId    String
   userId    String
   expiresAt DateTime
   usedAt    DateTime?
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
 
-  file      File     @relation(fields: [fileId], references: [id])
-  user      User     @relation(fields: [userId], references: [id])
+  file File @relation(fields: [fileId], references: [id])
+  user User @relation(fields: [userId], references: [id])
 }
 
 model AuditLog {
@@ -102,5 +102,5 @@ model AuditLog {
   ip        String?
   createdAt DateTime @default(now())
 
-  user      User?    @relation(fields: [userId], references: [id])
+  user User? @relation(fields: [userId], references: [id])
 }

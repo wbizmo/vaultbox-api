@@ -1,0 +1,4 @@
+ALTER TABLE "User"
+ALTER COLUMN "storageUsed"
+TYPE BIGINT
+USING "storageUsed"::BIGINT;
