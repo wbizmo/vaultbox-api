@@ -748,7 +748,7 @@ https://linkedin.com/in/wbizmo
 Portfolio
 
 ```text
-https://my-portfolio-website-three-ebon.vercel.app
+https://wbizmo.vercel.app
 ```
 
 ---
