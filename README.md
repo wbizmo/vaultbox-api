@@ -36,6 +36,48 @@ Once awake, all endpoints function normally.
 
 ---
 
+## Quick Start
+
+### Login (Demo User)
+
+```bash
+TOKEN=$(curl -s -X POST https://vaultbox-api-ucff.onrender.com/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"user@vaultbox.dev","password":"User123!"}' | jq -r '.token')
+
+echo $TOKEN
+```
+
+### Test Authentication
+
+```bash
+curl https://vaultbox-api-ucff.onrender.com/me \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### Check Quota
+
+```bash
+curl https://vaultbox-api-ucff.onrender.com/quota \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### List Files
+
+```bash
+curl https://vaultbox-api-ucff.onrender.com/files \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### List Folders
+
+```bash
+curl https://vaultbox-api-ucff.onrender.com/folders \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+---
+
 ## Live API Documentation
 
 Swagger UI:
@@ -186,10 +228,13 @@ Data is stored in PostgreSQL through Prisma ORM while Redis provides infrastruct
 * Swagger
 * OpenAPI
 
+### Hosting
+
+* Render
+
 ### Development
 
 * Replit
-* Render
 
 ---
 
@@ -634,7 +679,13 @@ DOWNLOAD_TOKEN_EXPIRES_MINUTES=5
 ### Render Build Command
 
 ```bash
-rm -rf node_modules package-lock.json && npm install --omit=dev
+npm install
+```
+
+### Render Pre-Deploy Command
+
+```bash
+npx prisma migrate deploy
 ```
 
 ### Render Start Command
