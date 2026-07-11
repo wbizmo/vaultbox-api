@@ -18,16 +18,17 @@ const adminRoutes = require("./routes/admin.routes");
 const infraRoutes = require("./routes/infra.routes");
 
 function buildApp() {
-  const app = Fastify({ logger: true });
+  const app = Fastify({
+    logger: true
+  });
 
-  app.register(cors, { origin: true });
+  app.register(cors, {
+    origin: true
+  });
 
   app.register(rateLimit, {
     max: 120,
-    timeWindow: "1 minute",
-    keyGenerator: (request) => {
-      return request.user?.id || request.ip;
-    }
+    timeWindow: "1 minute"
   });
 
   app.register(jwt, {
@@ -66,10 +67,10 @@ function buildApp() {
         { name: "Plans", description: "Storage plans and quota management" },
         { name: "Files", description: "File upload, listing and deletion" },
         { name: "Folders", description: "Folder organization endpoints" },
-        { name: "Downloads", description: "Signed download token generation and secure file retrieval" },
+        { name: "Downloads", description: "Secure signed downloads" },
         { name: "Billing", description: "Billing simulation and suspension workflow" },
-        { name: "Admin", description: "Admin user management, audit logs and platform reports" },
-        { name: "Infrastructure", description: "Database and Redis monitoring" }
+        { name: "Admin", description: "Administrative controls and reports" },
+        { name: "Infrastructure", description: "Database and Redis health checks" }
       ]
     }
   });
