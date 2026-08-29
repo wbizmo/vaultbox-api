@@ -9,7 +9,7 @@ const rateLimit = require("@fastify/rate-limit");
 const { getConfig } = require("./config/env");
 const { installErrorHandler } = require("./lib/errors");
 const { installRequestMetrics } = require("./lib/metrics");
-const { installSecurityHeaders } = require("./lib/security");
+const { installSecurityHeaders, redactRequestUrl } = require("./lib/security");
 
 const systemRoutes = require("./routes/system.routes");
 const authRoutes = require("./routes/auth.routes");
@@ -27,7 +27,8 @@ function buildApp(options = {}) {
   const app = Fastify({
     logger: options.logger ?? true,
     trustProxy: config.isProduction,
-    requestIdHeader: "x-request-id"
+    requestIdHeader: "x-request-id",
+    disableRequestLogging: true
   });
 
   app.decorate("vaultboxConfig", config);
@@ -49,9 +50,7 @@ function buildApp(options = {}) {
 
   app.register(jwt, {
     secret: config.jwtSecret || "local-development-only-secret",
-    sign: {
-      expiresIn: config.jwtExpiresIn
-    }
+    sign: { expiresIn: config.jwtExpiresIn }
   });
 
   app.register(multipart, {
@@ -92,13 +91,29 @@ function buildApp(options = {}) {
     }
   });
 
-  app.register(swaggerUi, {
-    routePrefix: "/docs"
-  });
+  app.register(swaggerUi, { routePrefix: "/docs" });
 
   installRequestMetrics(app);
   installSecurityHeaders(app);
   installErrorHandler(app);
+
+  app.addHook("onRequest", async (request) => {
+    request.log.info({
+      requestId: request.id,
+      method: request.method,
+      url: redactRequestUrl(request.raw.url),
+      ip: request.ip
+    }, "request started");
+  });
+
+  app.addHook("onResponse", async (request, reply) => {
+    request.log.info({
+      requestId: request.id,
+      method: request.method,
+      url: redactRequestUrl(request.raw.url),
+      statusCode: reply.statusCode
+    }, "request completed");
+  });
 
   app.register(systemRoutes);
   app.register(authRoutes);
