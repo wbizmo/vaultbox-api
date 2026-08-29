@@ -42,7 +42,7 @@ async function validateDownload(request, reply) {
     return null;
   }
 
-  if (!(await storage.exists(record.file.storedName))) {
+  if (!(await storage.existsFile(record.file))) {
     reply.code(404).send({ message: "Stored file missing" });
     return null;
   }
@@ -108,7 +108,7 @@ async function serveDownload(request, reply, headOnly = false) {
 
     if (headOnly) return reply.send();
 
-    return reply.send(storage.createReadStream(file.storedName, {
+    return reply.send(storage.createReadStreamForFile(file, {
       start: Number(range.start),
       end: Number(range.end)
     }));
@@ -116,7 +116,7 @@ async function serveDownload(request, reply, headOnly = false) {
 
   reply.header("Content-Length", totalSize.toString());
   if (headOnly) return reply.send();
-  return reply.send(storage.createReadStream(file.storedName));
+  return reply.send(storage.createReadStreamForFile(file));
 }
 
 async function downloadRoutes(app) {
