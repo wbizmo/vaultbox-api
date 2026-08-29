@@ -4,6 +4,7 @@ const { requireAdmin } = require("../middleware/admin");
 
 async function systemRoutes(app) {
   app.get("/", {
+    config: { rateLimit: false },
     schema: {
       tags: ["System"],
       summary: "API welcome route"
@@ -16,6 +17,7 @@ async function systemRoutes(app) {
   }));
 
   app.get("/health", {
+    config: { rateLimit: false },
     schema: {
       tags: ["System"],
       summary: "Liveness check"
