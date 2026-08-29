@@ -44,7 +44,7 @@
     "bcryptjs": "^3.0.3",
     "dotenv": "^17.4.2",
     "fastify": "^5.12.1",
-    "redis": "^6.0.0"
+    "redis": "^6.2.1"
   },
   "devDependencies": {
     "nodemon": "^3.1.14",
