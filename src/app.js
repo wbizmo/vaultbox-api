@@ -28,7 +28,8 @@ function buildApp(options = {}) {
     logger: options.logger ?? true,
     trustProxy: config.isProduction,
     requestIdHeader: "x-request-id",
-    disableRequestLogging: true
+    disableRequestLogging: true,
+    exposeHeadRoutes: false
   });
 
   app.decorate("vaultboxConfig", config);
