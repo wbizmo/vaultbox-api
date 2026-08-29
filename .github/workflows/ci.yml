@@ -1,0 +1,52 @@
+name: VaultBox CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - feat/vaultbox-v2-transfer-engine
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://benchmark:benchmark@127.0.0.1:5432/benchmark
+      JWT_SECRET: ci-only-secret-that-is-long-enough-for-tests
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Syntax check
+        run: find src scripts test prisma -name '*.js' -print0 | xargs -0 -n1 node --check
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Benchmark
+        run: npm run benchmark | tee benchmark.json
+
+      - name: Upload benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vaultbox-benchmark
+          path: benchmark.json
+          retention-days: 30
