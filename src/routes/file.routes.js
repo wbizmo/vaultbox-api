@@ -223,7 +223,7 @@ async function fileRoutes(app) {
       `;
     });
 
-    const removed = await storage.delete(file.storedName).catch((error) => {
+    const removed = await storage.deleteFile(file).catch((error) => {
       request.log.error({ err: error, fileId: file.id }, "Failed to remove stored file bytes");
       return false;
     });
