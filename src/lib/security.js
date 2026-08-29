@@ -14,6 +14,12 @@ function contentDispositionAttachment(name) {
   return `attachment; filename="${safe}"; filename*=UTF-8''${encoded}`;
 }
 
+function redactRequestUrl(url) {
+  return String(url || "")
+    .replace(/\/download\/[^/?#]+/g, "/download/[redacted]")
+    .replace(/([?&](?:token|access_token)=)[^&]+/gi, "$1[redacted]");
+}
+
 function installSecurityHeaders(app) {
   app.addHook("onSend", async (request, reply, payload) => {
     reply.header("X-Content-Type-Options", "nosniff");
@@ -33,5 +39,6 @@ function installSecurityHeaders(app) {
 module.exports = {
   sanitizeDownloadName,
   contentDispositionAttachment,
+  redactRequestUrl,
   installSecurityHeaders
 };
