@@ -10,17 +10,31 @@ class LocalStorageAdapter {
     await fs.promises.mkdir(this.root, { recursive: true });
   }
 
+  assertInsideRoot(candidate) {
+    const resolved = path.resolve(candidate);
+    if (!resolved.startsWith(`${this.root}${path.sep}`)) {
+      throw new Error("Storage path escaped the storage root");
+    }
+    return resolved;
+  }
+
   resolve(key) {
     if (!/^[a-zA-Z0-9._-]+$/.test(key)) {
       throw new Error("Invalid storage key");
     }
+    return this.assertInsideRoot(path.join(this.root, key));
+  }
 
-    const resolved = path.resolve(this.root, key);
-    if (!resolved.startsWith(`${this.root}${path.sep}`)) {
-      throw new Error("Storage key escaped the storage root");
+  resolveFile(file) {
+    if (!file?.storedName) throw new Error("Stored file key is missing");
+
+    if (/^[a-zA-Z0-9._-]+$/.test(file.storedName)) {
+      return this.resolve(file.storedName);
     }
 
-    return resolved;
+    // v1 stored names included the original filename. Preserve compatibility
+    // while still refusing traversal outside the configured storage root.
+    return this.assertInsideRoot(path.join(this.root, file.storedName));
   }
 
   createWriteStream(key) {
@@ -29,6 +43,10 @@ class LocalStorageAdapter {
 
   createReadStream(key, options = {}) {
     return fs.createReadStream(this.resolve(key), options);
+  }
+
+  createReadStreamForFile(file, options = {}) {
+    return fs.createReadStream(this.resolveFile(file), options);
   }
 
   async stat(key) {
@@ -44,9 +62,28 @@ class LocalStorageAdapter {
     }
   }
 
+  async existsFile(file) {
+    try {
+      await fs.promises.access(this.resolveFile(file), fs.constants.R_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async delete(key) {
     try {
       await fs.promises.unlink(this.resolve(key));
+      return true;
+    } catch (error) {
+      if (error.code === "ENOENT") return false;
+      throw error;
+    }
+  }
+
+  async deleteFile(file) {
+    try {
+      await fs.promises.unlink(this.resolveFile(file));
       return true;
     } catch (error) {
       if (error.code === "ENOENT") return false;
