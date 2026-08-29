@@ -7,6 +7,8 @@
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
     "build": "echo build skipped",
+    "test": "node --test",
+    "benchmark": "node scripts/benchmark.js",
     "deploy:migrate": "npx prisma migrate deploy",
     "seed": "node prisma/seed.js"
   },
@@ -20,7 +22,9 @@
     "jwt",
     "swagger",
     "api",
-    "saas"
+    "saas",
+    "resumable-downloads",
+    "http-range"
   ],
   "author": "Williams Ashibuogwu",
   "license": "MIT",
