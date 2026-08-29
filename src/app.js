@@ -1,4 +1,5 @@
 const Fastify = require("fastify");
+const { LogController } = require("fastify");
 const cors = require("@fastify/cors");
 const jwt = require("@fastify/jwt");
 const multipart = require("@fastify/multipart");
@@ -28,7 +29,7 @@ function buildApp(options = {}) {
     logger: options.logger ?? true,
     trustProxy: config.isProduction,
     requestIdHeader: "x-request-id",
-    disableRequestLogging: true,
+    logController: new LogController({ disableRequestLogging: true }),
     exposeHeadRoutes: false
   });
 
