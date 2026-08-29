@@ -1,5 +1,6 @@
 const prisma = require("../lib/prisma");
 const { requireAuth } = require("../middleware/auth");
+const cache = require("../lib/cache");
 
 async function billingRoutes(app) {
   app.post("/billing/simulate-failed-payment", {
@@ -7,45 +8,29 @@ async function billingRoutes(app) {
     schema: {
       tags: ["Billing"],
       summary: "Simulate failed payment and suspend account",
-      security: [{ bearerAuth: [] }],
-      response: {
-        200: {
-          type: "object",
-          properties: {
-            message: { type: "string" },
-            user: {
-              type: "object",
-              properties: {
-                id: { type: "string" },
-                name: { type: "string" },
-                email: { type: "string" },
-                status: { type: "string" }
-              }
-            }
-          }
-        }
-      }
+      security: [{ bearerAuth: [] }]
     }
   }, async (request) => {
-    const user = await prisma.user.update({
-      where: { id: request.user.id },
-      data: { status: "SUSPENDED" },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        status: true
-      }
+    const user = await prisma.$transaction(async (tx) => {
+      const updated = await tx.user.update({
+        where: { id: request.user.id },
+        data: { status: "SUSPENDED" },
+        select: { id: true, name: true, email: true, status: true }
+      });
+
+      await tx.auditLog.create({
+        data: {
+          action: "PAYMENT_FAILED",
+          details: "Simulated billing failure. Account suspended.",
+          userId: updated.id,
+          ip: request.ip
+        }
+      });
+
+      return updated;
     });
 
-    await prisma.auditLog.create({
-      data: {
-        action: "PAYMENT_FAILED",
-        details: "Simulated billing failure. Account suspended.",
-        userId: user.id,
-        ip: request.ip
-      }
-    });
+    await cache.del("auth-user", user.id);
 
     return {
       message: "Payment failure simulated. Account suspended.",

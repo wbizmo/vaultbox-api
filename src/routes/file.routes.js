@@ -1,23 +1,25 @@
-const fs = require("fs");
-const path = require("path");
 const crypto = require("crypto");
 const { pipeline } = require("stream/promises");
 
 const prisma = require("../lib/prisma");
 const { requireAuth } = require("../middleware/auth");
+const { formatBytes } = require("../lib/bytes");
+const { HashingTransform } = require("../lib/hash-stream");
+const { storage } = require("../lib/storage");
+const cache = require("../lib/cache");
 
-const uploadDir = path.join(process.cwd(), "storage", "uploads");
-
-function formatBytes(bytes) {
-  const value = Number(bytes);
-  if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(2)} GB`;
-  if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(2)} MB`;
-  if (value >= 1024) return `${(value / 1024).toFixed(2)} KB`;
-  return `${value} B`;
-}
-
-async function ensureUploadDir() {
-  await fs.promises.mkdir(uploadDir, { recursive: true });
+function serializeFile(file) {
+  return {
+    id: file.id,
+    originalName: file.originalName,
+    mimeType: file.mimeType,
+    size: file.size.toString(),
+    sizeFormatted: formatBytes(file.size),
+    checksum: file.checksum,
+    folderId: file.folderId,
+    createdAt: file.createdAt,
+    updatedAt: file.updatedAt
+  };
 }
 
 async function fileRoutes(app) {
@@ -25,127 +27,111 @@ async function fileRoutes(app) {
     preHandler: requireAuth,
     schema: {
       tags: ["Files"],
-      summary: "Upload a file with quota enforcement",
+      summary: "Stream a file to storage with atomic quota enforcement",
       security: [{ bearerAuth: [] }],
-      consumes: ["multipart/form-data"],
-      response: {
-        201: {
-          type: "object",
-          properties: {
-            message: { type: "string" },
-            file: {
-              type: "object",
-              properties: {
-                id: { type: "string" },
-                originalName: { type: "string" },
-                mimeType: { type: "string" },
-                size: { type: "string" },
-                sizeFormatted: { type: "string" },
-                checksum: { type: "string" },
-                createdAt: { type: "string" }
-              }
-            },
-            quota: {
-              type: "object",
-              properties: {
-                storageUsed: { type: "string" },
-                storageLimit: { type: "string" },
-                storageUsedFormatted: { type: "string" },
-                storageLimitFormatted: { type: "string" }
-              }
-            }
-          }
-        }
-      }
+      consumes: ["multipart/form-data"]
     }
   }, async (request, reply) => {
-    await ensureUploadDir();
+    await storage.ready();
 
     const user = await prisma.user.findUnique({
       where: { id: request.user.id },
       include: { plan: true }
     });
 
-    if (!user || user.status !== "ACTIVE") {
-      return reply.code(403).send({ message: "Account is not active" });
-    }
-
-    if (!user.plan) {
+    if (!user?.plan) {
       return reply.code(403).send({ message: "No active storage plan found" });
     }
 
     const data = await request.file();
+    if (!data) return reply.code(400).send({ message: "No file uploaded" });
 
-    if (!data) {
-      return reply.code(400).send({ message: "No file uploaded" });
+    const originalName = String(data.filename || "upload").slice(0, 255);
+    const mimeType = String(data.mimetype || "application/octet-stream").slice(0, 255);
+    const storedName = crypto.randomUUID();
+    const hasher = new HashingTransform("sha256");
+
+    try {
+      await pipeline(data.file, hasher, storage.createWriteStream(storedName));
+    } catch (error) {
+      await storage.delete(storedName).catch(() => false);
+      throw error;
     }
 
-    const originalName = data.filename;
-    const mimeType = data.mimetype || "application/octet-stream";
-    const storedName = `${crypto.randomUUID()}-${originalName}`;
-    const filePath = path.join(uploadDir, storedName);
+    if (data.file.truncated) {
+      await storage.delete(storedName).catch(() => false);
+      return reply.code(413).send({ message: "Upload exceeds the configured file-size limit" });
+    }
 
-    await pipeline(data.file, fs.createWriteStream(filePath));
+    const fileSize = hasher.bytes;
+    const checksum = hasher.digest();
+    let file;
 
-    const stats = await fs.promises.stat(filePath);
-    const fileSize = BigInt(stats.size);
-    const nextUsage = BigInt(user.storageUsed) + fileSize;
+    try {
+      file = await prisma.$transaction(async (tx) => {
+        const reserved = await tx.$executeRaw`
+          UPDATE "User"
+          SET "storageUsed" = "storageUsed" + ${fileSize}, "updatedAt" = NOW()
+          WHERE "id" = ${user.id}
+            AND "storageUsed" + ${fileSize} <= ${user.plan.storageLimit}
+        `;
 
-    if (nextUsage > BigInt(user.plan.storageLimit)) {
-      await fs.promises.unlink(filePath);
+        if (reserved !== 1) {
+          const quotaError = new Error("Storage quota exceeded");
+          quotaError.code = "STORAGE_QUOTA_EXCEEDED";
+          throw quotaError;
+        }
 
-      return reply.code(413).send({
-        message: "Storage quota exceeded",
-        storageUsed: user.storageUsed.toString(),
-        storageLimit: user.plan.storageLimit.toString(),
-        attemptedUploadSize: fileSize.toString()
+        return tx.file.create({
+          data: {
+            originalName,
+            storedName,
+            mimeType,
+            size: fileSize,
+            path: storedName,
+            checksum,
+            userId: user.id
+          }
+        });
       });
+    } catch (error) {
+      await storage.delete(storedName).catch(() => false);
+
+      if (error.code === "STORAGE_QUOTA_EXCEEDED") {
+        return reply.code(413).send({
+          message: "Storage quota exceeded",
+          storageLimit: user.plan.storageLimit.toString(),
+          attemptedUploadSize: fileSize.toString()
+        });
+      }
+
+      throw error;
     }
 
-    const fileBuffer = await fs.promises.readFile(filePath);
-    const checksum = crypto.createHash("sha256").update(fileBuffer).digest("hex");
-
-    const file = await prisma.file.create({
-      data: {
-        originalName,
-        storedName,
-        mimeType,
-        size: fileSize,
-        path: filePath,
-        checksum,
-        userId: user.id
-      }
-    });
-
-    await prisma.user.update({
+    const currentUser = await prisma.user.findUnique({
       where: { id: user.id },
-      data: { storageUsed: nextUsage }
+      select: { storageUsed: true }
     });
 
-    await prisma.auditLog.create({
-      data: {
-        action: "FILE_UPLOADED",
-        details: originalName,
-        userId: user.id,
-        ip: request.ip
-      }
-    });
+    await Promise.all([
+      prisma.auditLog.create({
+        data: {
+          action: "FILE_UPLOADED",
+          details: `${file.id}:${originalName}`,
+          userId: user.id,
+          ip: request.ip
+        }
+      }),
+      cache.del("file-list", user.id)
+    ]);
 
     return reply.code(201).send({
       message: "File uploaded successfully",
-      file: {
-        id: file.id,
-        originalName: file.originalName,
-        mimeType: file.mimeType,
-        size: file.size.toString(),
-        sizeFormatted: formatBytes(file.size),
-        checksum: file.checksum,
-        createdAt: file.createdAt
-      },
+      file: serializeFile(file),
       quota: {
-        storageUsed: nextUsage.toString(),
+        storageUsed: currentUser.storageUsed.toString(),
         storageLimit: user.plan.storageLimit.toString(),
-        storageUsedFormatted: formatBytes(nextUsage),
+        storageUsedFormatted: formatBytes(currentUser.storageUsed),
         storageLimitFormatted: formatBytes(user.plan.storageLimit)
       }
     });
@@ -155,50 +141,49 @@ async function fileRoutes(app) {
     preHandler: requireAuth,
     schema: {
       tags: ["Files"],
-      summary: "List current user's files",
+      summary: "List current user's files with bounded pagination",
       security: [{ bearerAuth: [] }],
-      response: {
-        200: {
-          type: "object",
-          properties: {
-            files: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  id: { type: "string" },
-                  originalName: { type: "string" },
-                  mimeType: { type: "string" },
-                  size: { type: "string" },
-                  sizeFormatted: { type: "string" },
-                  checksum: { type: "string" },
-                  createdAt: { type: "string" }
-                }
-              }
-            }
-          }
+      querystring: {
+        type: "object",
+        properties: {
+          page: { type: "integer", minimum: 1, maximum: 1000000 },
+          limit: { type: "integer", minimum: 1, maximum: 100 },
+          search: { type: "string", maxLength: 120 },
+          sort: { type: "string", enum: ["createdAt", "updatedAt", "size", "originalName"] },
+          order: { type: "string", enum: ["asc", "desc"] }
         }
       }
     }
   }, async (request) => {
-    const files = await prisma.file.findMany({
-      where: {
-        userId: request.user.id,
-        status: "ACTIVE"
-      },
-      orderBy: { createdAt: "desc" }
-    });
+    const page = Number(request.query.page || 1);
+    const limit = Number(request.query.limit || 25);
+    const search = request.query.search?.trim();
+    const sort = request.query.sort || "createdAt";
+    const order = request.query.order || "desc";
+    const where = {
+      userId: request.user.id,
+      status: "ACTIVE",
+      ...(search ? { originalName: { contains: search, mode: "insensitive" } } : {})
+    };
+
+    const [total, files] = await prisma.$transaction([
+      prisma.file.count({ where }),
+      prisma.file.findMany({
+        where,
+        orderBy: { [sort]: order },
+        skip: (page - 1) * limit,
+        take: limit
+      })
+    ]);
 
     return {
-      files: files.map((file) => ({
-        id: file.id,
-        originalName: file.originalName,
-        mimeType: file.mimeType,
-        size: file.size.toString(),
-        sizeFormatted: formatBytes(file.size),
-        checksum: file.checksum,
-        createdAt: file.createdAt
-      }))
+      files: files.map(serializeFile),
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.max(1, Math.ceil(total / limit))
+      }
     };
   });
 
@@ -206,22 +191,12 @@ async function fileRoutes(app) {
     preHandler: requireAuth,
     schema: {
       tags: ["Files"],
-      summary: "Delete a file and update storage usage",
+      summary: "Delete a file and update storage usage atomically",
       security: [{ bearerAuth: [] }],
       params: {
         type: "object",
         required: ["id"],
-        properties: {
-          id: { type: "string" }
-        }
-      },
-      response: {
-        200: {
-          type: "object",
-          properties: {
-            message: { type: "string" }
-          }
-        }
+        properties: { id: { type: "string" } }
       }
     }
   }, async (request, reply) => {
@@ -233,40 +208,38 @@ async function fileRoutes(app) {
       }
     });
 
-    if (!file) {
-      return reply.code(404).send({ message: "File not found" });
-    }
+    if (!file) return reply.code(404).send({ message: "File not found" });
 
-    if (fs.existsSync(file.path)) {
-      await fs.promises.unlink(file.path);
-    }
+    await prisma.$transaction(async (tx) => {
+      await tx.file.update({
+        where: { id: file.id },
+        data: { status: "DELETED" }
+      });
 
-    await prisma.file.update({
-      where: { id: file.id },
-      data: { status: "DELETED" }
+      await tx.$executeRaw`
+        UPDATE "User"
+        SET "storageUsed" = GREATEST("storageUsed" - ${file.size}, 0), "updatedAt" = NOW()
+        WHERE "id" = ${request.user.id}
+      `;
     });
 
-    const user = await prisma.user.findUnique({
-      where: { id: request.user.id }
+    const removed = await storage.deleteFile(file).catch((error) => {
+      request.log.error({ err: error, fileId: file.id }, "Failed to remove stored file bytes");
+      return false;
     });
 
-    const newUsage = BigInt(user.storageUsed) - BigInt(file.size);
-
-    await prisma.user.update({
-      where: { id: request.user.id },
-      data: {
-        storageUsed: newUsage > 0n ? newUsage : 0n
-      }
-    });
-
-    await prisma.auditLog.create({
-      data: {
-        action: "FILE_DELETED",
-        details: file.originalName,
-        userId: request.user.id,
-        ip: request.ip
-      }
-    });
+    await Promise.all([
+      prisma.auditLog.create({
+        data: {
+          action: removed ? "FILE_DELETED" : "FILE_DELETED_METADATA_ONLY",
+          details: `${file.id}:${file.originalName}`,
+          userId: request.user.id,
+          ip: request.ip
+        }
+      }),
+      cache.del("file", file.id),
+      cache.del("file-list", request.user.id)
+    ]);
 
     return { message: "File deleted successfully" };
   });

@@ -40,6 +40,9 @@ model User {
   folders   Folder[]
   tokens    DownloadToken[]
   auditLogs AuditLog[]
+
+  @@index([status, createdAt])
+  @@index([planId])
 }
 
 model Plan {
@@ -60,6 +63,8 @@ model Folder {
 
   user  User   @relation(fields: [userId], references: [id])
   files File[]
+
+  @@index([userId, createdAt])
 }
 
 model File {
@@ -79,6 +84,10 @@ model File {
   user   User            @relation(fields: [userId], references: [id])
   folder Folder?         @relation(fields: [folderId], references: [id])
   tokens DownloadToken[]
+
+  @@index([userId, status, createdAt])
+  @@index([userId, originalName])
+  @@index([folderId])
 }
 
 model DownloadToken {
@@ -92,6 +101,10 @@ model DownloadToken {
 
   file File @relation(fields: [fileId], references: [id])
   user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, expiresAt])
+  @@index([fileId, expiresAt])
+  @@index([expiresAt])
 }
 
 model AuditLog {
@@ -103,4 +116,8 @@ model AuditLog {
   createdAt DateTime @default(now())
 
   user User? @relation(fields: [userId], references: [id])
+
+  @@index([createdAt])
+  @@index([action, createdAt])
+  @@index([userId, createdAt])
 }

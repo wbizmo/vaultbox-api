@@ -1,13 +1,33 @@
 const prisma = require("../lib/prisma");
 const { requireAuth } = require("../middleware/auth");
 const { requireAdmin } = require("../middleware/admin");
+const { formatBytes } = require("../lib/bytes");
+const cache = require("../lib/cache");
 
-function formatBytes(bytes) {
-  const value = Number(bytes);
-  if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(2)} GB`;
-  if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(2)} MB`;
-  if (value >= 1024) return `${(value / 1024).toFixed(2)} KB`;
-  return `${value} B`;
+function serializeAdminUser(user) {
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    status: user.status,
+    storageUsed: user.storageUsed.toString(),
+    storageUsedFormatted: formatBytes(user.storageUsed),
+    plan: user.plan
+      ? {
+          id: user.plan.id,
+          name: user.plan.name,
+          priceMonthly: user.plan.priceMonthly,
+          storageLimit: user.plan.storageLimit.toString(),
+          storageLimitFormatted: formatBytes(user.plan.storageLimit)
+        }
+      : null,
+    createdAt: user.createdAt
+  };
+}
+
+async function invalidateAccount(userId) {
+  await cache.del("auth-user", userId);
 }
 
 async function adminRoutes(app) {
@@ -15,63 +35,55 @@ async function adminRoutes(app) {
     preHandler: [requireAuth, requireAdmin],
     schema: {
       tags: ["Admin"],
-      summary: "List all users",
-      security: [{ bearerAuth: [] }]
+      summary: "List users with bounded pagination",
+      security: [{ bearerAuth: [] }],
+      querystring: {
+        type: "object",
+        properties: {
+          page: { type: "integer", minimum: 1 },
+          limit: { type: "integer", minimum: 1, maximum: 100 },
+          status: { type: "string", enum: ["ACTIVE", "SUSPENDED", "DELETED"] },
+          search: { type: "string", maxLength: 120 }
+        }
+      }
     }
-  }, async () => {
-    const users = await prisma.user.findMany({
-      include: { plan: true },
-      orderBy: { createdAt: "desc" }
-    });
+  }, async (request) => {
+    const page = Number(request.query.page || 1);
+    const limit = Number(request.query.limit || 25);
+    const search = request.query.search?.trim();
+    const where = {
+      ...(request.query.status ? { status: request.query.status } : {}),
+      ...(search ? {
+        OR: [
+          { name: { contains: search, mode: "insensitive" } },
+          { email: { contains: search, mode: "insensitive" } }
+        ]
+      } : {})
+    };
+
+    const [total, users] = await prisma.$transaction([
+      prisma.user.count({ where }),
+      prisma.user.findMany({
+        where,
+        include: { plan: true },
+        orderBy: { createdAt: "desc" },
+        skip: (page - 1) * limit,
+        take: limit
+      })
+    ]);
 
     return {
-      users: users.map((user) => ({
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        status: user.status,
-        storageUsed: user.storageUsed.toString(),
-        storageUsedFormatted: formatBytes(user.storageUsed),
-        plan: user.plan
-          ? {
-              id: user.plan.id,
-              name: user.plan.name,
-              priceMonthly: user.plan.priceMonthly,
-              storageLimit: user.plan.storageLimit.toString(),
-              storageLimitFormatted: formatBytes(user.plan.storageLimit)
-            }
-          : null,
-        createdAt: user.createdAt
-      }))
+      users: users.map(serializeAdminUser),
+      pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) }
     };
   });
 
   app.patch("/admin/users/:id/suspend", {
     preHandler: [requireAuth, requireAdmin],
-    schema: {
-      tags: ["Admin"],
-      summary: "Suspend a user account",
-      security: [{ bearerAuth: [] }],
-      params: {
-        type: "object",
-        required: ["id"],
-        properties: { id: { type: "string" } }
-      },
-      body: {
-        type: "object",
-        properties: {
-          reason: { type: "string" }
-        }
-      }
-    }
+    schema: { tags: ["Admin"], summary: "Suspend a user account", security: [{ bearerAuth: [] }] }
   }, async (request, reply) => {
     const { id } = request.params;
-    const { reason } = request.body || {};
-
-    if (id === request.user.id) {
-      return reply.code(400).send({ message: "You cannot suspend your own account" });
-    }
+    if (id === request.user.id) return reply.code(400).send({ message: "You cannot suspend your own account" });
 
     const user = await prisma.user.findUnique({ where: { id } });
     if (!user) return reply.code(404).send({ message: "User not found" });
@@ -82,72 +94,55 @@ async function adminRoutes(app) {
       select: { id: true, name: true, email: true, role: true, status: true }
     });
 
-    await prisma.auditLog.create({
-      data: {
-        action: "USER_SUSPENDED",
-        details: reason || `Suspended ${user.email}`,
-        userId: request.user.id,
-        ip: request.ip
-      }
-    });
+    await Promise.all([
+      invalidateAccount(id),
+      prisma.auditLog.create({
+        data: {
+          action: "USER_SUSPENDED",
+          details: request.body?.reason || `Suspended ${user.email}`,
+          userId: request.user.id,
+          ip: request.ip
+        }
+      })
+    ]);
 
     return { message: "User suspended successfully", user: updatedUser };
   });
 
   app.patch("/admin/users/:id/reactivate", {
     preHandler: [requireAuth, requireAdmin],
-    schema: {
-      tags: ["Admin"],
-      summary: "Reactivate a suspended user",
-      security: [{ bearerAuth: [] }],
-      params: {
-        type: "object",
-        required: ["id"],
-        properties: { id: { type: "string" } }
-      }
-    }
+    schema: { tags: ["Admin"], summary: "Reactivate a suspended user", security: [{ bearerAuth: [] }] }
   }, async (request, reply) => {
-    const { id } = request.params;
-
-    const user = await prisma.user.findUnique({ where: { id } });
+    const user = await prisma.user.findUnique({ where: { id: request.params.id } });
     if (!user) return reply.code(404).send({ message: "User not found" });
 
     const updatedUser = await prisma.user.update({
-      where: { id },
+      where: { id: user.id },
       data: { status: "ACTIVE" },
       select: { id: true, name: true, email: true, role: true, status: true }
     });
 
-    await prisma.auditLog.create({
-      data: {
-        action: "USER_REACTIVATED",
-        details: `Reactivated ${user.email}`,
-        userId: request.user.id,
-        ip: request.ip
-      }
-    });
+    await Promise.all([
+      invalidateAccount(user.id),
+      prisma.auditLog.create({
+        data: {
+          action: "USER_REACTIVATED",
+          details: `Reactivated ${user.email}`,
+          userId: request.user.id,
+          ip: request.ip
+        }
+      })
+    ]);
 
     return { message: "User reactivated successfully", user: updatedUser };
   });
 
   app.delete("/admin/users/:id", {
     preHandler: [requireAuth, requireAdmin],
-    schema: {
-      tags: ["Admin"],
-      summary: "Soft delete a user account",
-      security: [{ bearerAuth: [] }],
-      params: {
-        type: "object",
-        required: ["id"],
-        properties: { id: { type: "string" } }
-      }
-    }
+    schema: { tags: ["Admin"], summary: "Soft delete a user account", security: [{ bearerAuth: [] }] }
   }, async (request, reply) => {
     const { id } = request.params;
-
-    if (id === request.user.id) {
-      return reply.code(400).send({ message: "You cannot delete your own account" });
-    }
+    if (id === request.user.id) return reply.code(400).send({ message: "You cannot delete your own account" });
 
     const user = await prisma.user.findUnique({ where: { id } });
     if (!user) return reply.code(404).send({ message: "User not found" });
@@ -158,37 +153,38 @@ async function adminRoutes(app) {
       select: { id: true, name: true, email: true, role: true, status: true }
     });
 
-    await prisma.auditLog.create({
-      data: {
-        action: "USER_DELETED",
-        details: `Deleted ${user.email}`,
-        userId: request.user.id,
-        ip: request.ip
-      }
-    });
+    await Promise.all([
+      invalidateAccount(id),
+      prisma.auditLog.create({
+        data: {
+          action: "USER_DELETED",
+          details: `Deleted ${user.email}`,
+          userId: request.user.id,
+          ip: request.ip
+        }
+      })
+    ]);
 
     return { message: "User deleted successfully", user: deletedUser };
   });
 
   app.get("/admin/storage-report", {
     preHandler: [requireAuth, requireAdmin],
-    schema: {
-      tags: ["Admin"],
-      summary: "Get platform-wide storage report",
-      security: [{ bearerAuth: [] }]
-    }
+    schema: { tags: ["Admin"], summary: "Get platform-wide storage report", security: [{ bearerAuth: [] }] }
   }, async () => {
-    const users = await prisma.user.findMany({ include: { plan: true } });
+    const [statusGroups, storage] = await Promise.all([
+      prisma.user.groupBy({ by: ["status"], _count: { _all: true } }),
+      prisma.user.aggregate({ _sum: { storageUsed: true }, _count: { _all: true } })
+    ]);
 
-    const totalStorageUsed = users.reduce((sum, user) => {
-      return sum + BigInt(user.storageUsed);
-    }, 0n);
+    const counts = Object.fromEntries(statusGroups.map((group) => [group.status, group._count._all]));
+    const totalStorageUsed = storage._sum.storageUsed || 0n;
 
     return {
-      totalUsers: users.length,
-      activeUsers: users.filter((user) => user.status === "ACTIVE").length,
-      suspendedUsers: users.filter((user) => user.status === "SUSPENDED").length,
-      deletedUsers: users.filter((user) => user.status === "DELETED").length,
+      totalUsers: storage._count._all,
+      activeUsers: counts.ACTIVE || 0,
+      suspendedUsers: counts.SUSPENDED || 0,
+      deletedUsers: counts.DELETED || 0,
       totalStorageUsed: totalStorageUsed.toString(),
       totalStorageUsedFormatted: formatBytes(totalStorageUsed)
     };
@@ -198,40 +194,36 @@ async function adminRoutes(app) {
     preHandler: [requireAuth, requireAdmin],
     schema: {
       tags: ["Admin"],
-      summary: "View audit logs",
+      summary: "View audit logs with cursor-friendly pagination",
       security: [{ bearerAuth: [] }],
       querystring: {
         type: "object",
         properties: {
+          page: { type: "integer", minimum: 1 },
           limit: { type: "integer", minimum: 1, maximum: 100 },
-          action: { type: "string" }
+          action: { type: "string", maxLength: 80 }
         }
       }
     }
   }, async (request) => {
+    const page = Number(request.query.page || 1);
     const limit = Number(request.query.limit || 50);
-    const action = request.query.action;
+    const where = request.query.action ? { action: request.query.action } : {};
 
-    const logs = await prisma.auditLog.findMany({
-      where: action ? { action } : {},
-      include: {
-        user: {
-          select: { id: true, name: true, email: true, role: true }
-        }
-      },
-      orderBy: { createdAt: "desc" },
-      take: limit
-    });
+    const [total, logs] = await prisma.$transaction([
+      prisma.auditLog.count({ where }),
+      prisma.auditLog.findMany({
+        where,
+        include: { user: { select: { id: true, name: true, email: true, role: true } } },
+        orderBy: { createdAt: "desc" },
+        skip: (page - 1) * limit,
+        take: limit
+      })
+    ]);
 
     return {
-      logs: logs.map((log) => ({
-        id: log.id,
-        action: log.action,
-        details: log.details,
-        ip: log.ip,
-        createdAt: log.createdAt,
-        user: log.user
-      }))
+      logs,
+      pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) }
     };
   });
 }

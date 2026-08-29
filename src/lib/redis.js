@@ -1,36 +1,57 @@
 const { createClient } = require("redis");
 
-const rawRedisUrl = process.env.REDIS_URL;
-const redisUrl = rawRedisUrl?.startsWith("redis://")
-  ? rawRedisUrl.replace("redis://", "rediss://")
-  : rawRedisUrl;
+const redisUrl = process.env.REDIS_URL?.trim() || null;
 
-const redis = createClient({
-  url: redisUrl,
-  socket: {
-    reconnectStrategy: (retries) => Math.min(retries * 100, 3000)
-  }
-});
+const redis = redisUrl
+  ? createClient({
+      url: redisUrl,
+      socket: {
+        connectTimeout: 5000,
+        keepAlive: 5000,
+        reconnectStrategy: (retries) => Math.min(100 * 2 ** Math.min(retries, 5), 3000)
+      }
+    })
+  : null;
 
-redis.on("error", (error) => {
-  console.error("Redis Error:", error.message);
-});
+if (redis) {
+  redis.on("error", (error) => {
+    console.error("Redis error:", error.message);
+  });
+
+  redis.on("reconnecting", () => {
+    console.warn("Redis reconnecting");
+  });
+}
 
 async function connectRedis() {
-  if (!redisUrl) {
-    console.warn("Redis URL not configured");
+  if (!redis) {
     return null;
   }
 
   if (!redis.isOpen) {
     await redis.connect();
-    console.log("Redis connected");
   }
 
   return redis;
 }
 
+async function disconnectRedis() {
+  if (redis?.isOpen) {
+    await redis.quit();
+  }
+}
+
+function getRedisState() {
+  return {
+    configured: Boolean(redisUrl),
+    open: Boolean(redis?.isOpen),
+    ready: Boolean(redis?.isReady)
+  };
+}
+
 module.exports = {
   redis,
-  connectRedis
+  connectRedis,
+  disconnectRedis,
+  getRedisState
 };

@@ -1,34 +1,135 @@
-const fs = require("fs");
-const path = require("path");
-const crypto = require("crypto");
-
 const prisma = require("../lib/prisma");
 const { requireAuth } = require("../middleware/auth");
+const { storage } = require("../lib/storage");
+const { contentDispositionAttachment } = require("../lib/security");
+const { parseSingleRange, rangeHeader } = require("../lib/range");
+const { createDownloadToken, hashDownloadToken, etagForChecksum } = require("../lib/download-token");
+const { throttlePreHandler } = require("../lib/throttle");
+
+const tokenThrottle = throttlePreHandler(
+  "download-token",
+  { limit: 60, windowSeconds: 60 },
+  (request) => request.user?.id || request.ip
+);
+
+async function loadDownloadRecord(rawToken) {
+  return prisma.downloadToken.findUnique({
+    where: { token: hashDownloadToken(rawToken) },
+    include: { file: true, user: true }
+  });
+}
+
+async function validateDownload(request, reply) {
+  const record = await loadDownloadRecord(request.params.token);
+
+  if (!record) {
+    reply.code(404).send({ message: "Invalid download token" });
+    return null;
+  }
+
+  if (record.expiresAt < new Date()) {
+    reply.code(410).send({ message: "Download token has expired" });
+    return null;
+  }
+
+  if (record.user.status !== "ACTIVE") {
+    reply.code(403).send({ message: "Account is not active" });
+    return null;
+  }
+
+  if (record.file.status !== "ACTIVE") {
+    reply.code(404).send({ message: "File no longer exists" });
+    return null;
+  }
+
+  if (!(await storage.existsFile(record.file))) {
+    reply.code(404).send({ message: "Stored file missing" });
+    return null;
+  }
+
+  return record;
+}
+
+async function recordFirstDownload(request, record) {
+  const updated = await prisma.downloadToken.updateMany({
+    where: { id: record.id, usedAt: null },
+    data: { usedAt: new Date() }
+  });
+
+  if (updated.count === 1) {
+    await prisma.auditLog.create({
+      data: {
+        action: "DOWNLOAD_SESSION_STARTED",
+        details: `${record.file.id}:${record.file.originalName}`,
+        userId: record.userId,
+        ip: request.ip
+      }
+    });
+  }
+}
+
+function setDownloadHeaders(reply, file, etag) {
+  reply.header("Accept-Ranges", "bytes");
+  reply.header("Cache-Control", "private, no-store");
+  reply.header("Content-Disposition", contentDispositionAttachment(file.originalName));
+  reply.header("Content-Type", file.mimeType || "application/octet-stream");
+  if (etag) reply.header("ETag", etag);
+  reply.header("Last-Modified", file.updatedAt.toUTCString());
+}
+
+async function serveDownload(request, reply, headOnly = false) {
+  const record = await validateDownload(request, reply);
+  if (!record) return;
+
+  const file = record.file;
+  const totalSize = BigInt(file.size);
+  const etag = etagForChecksum(file.checksum);
+  setDownloadHeaders(reply, file, etag);
+
+  const ifRange = request.headers["if-range"];
+  const canUseRange = !ifRange || (etag && ifRange === etag);
+  let range = null;
+
+  if (request.headers.range && canUseRange) {
+    try {
+      range = parseSingleRange(request.headers.range, totalSize);
+    } catch (error) {
+      reply.header("Content-Range", `bytes */${totalSize}`);
+      return reply.code(416).send({ message: error.message });
+    }
+  }
+
+  await recordFirstDownload(request, record);
+
+  if (range) {
+    reply.code(206);
+    reply.header("Content-Range", rangeHeader(range, totalSize));
+    reply.header("Content-Length", range.length.toString());
+
+    if (headOnly) return reply.send();
+
+    return reply.send(storage.createReadStreamForFile(file, {
+      start: Number(range.start),
+      end: Number(range.end)
+    }));
+  }
+
+  reply.header("Content-Length", totalSize.toString());
+  if (headOnly) return reply.send();
+  return reply.send(storage.createReadStreamForFile(file));
+}
 
 async function downloadRoutes(app) {
   app.post("/files/:id/download-token", {
-    preHandler: requireAuth,
+    preHandler: [requireAuth, tokenThrottle],
     schema: {
       tags: ["Downloads"],
-      summary: "Create a short-lived signed download token",
+      summary: "Create a resumable short-lived download session",
       security: [{ bearerAuth: [] }],
       params: {
         type: "object",
         required: ["id"],
-        properties: {
-          id: { type: "string" }
-        }
-      },
-      response: {
-        200: {
-          type: "object",
-          properties: {
-            message: { type: "string" },
-            token: { type: "string" },
-            expiresAt: { type: "string" },
-            downloadUrl: { type: "string" }
-          }
-        }
+        properties: { id: { type: "string" } }
       }
     }
   }, async (request, reply) => {
@@ -42,86 +143,90 @@ async function downloadRoutes(app) {
 
     if (!file) return reply.code(404).send({ message: "File not found" });
 
-    const user = await prisma.user.findUnique({ where: { id: request.user.id } });
-
-    if (!user || user.status !== "ACTIVE") {
-      return reply.code(403).send({ message: "Account is not active" });
-    }
-
-    const expiresInMinutes = Number(process.env.DOWNLOAD_TOKEN_EXPIRES_MINUTES || 5);
-    const expiresAt = new Date(Date.now() + expiresInMinutes * 60 * 1000);
-    const token = crypto.randomBytes(32).toString("hex");
+    const expiresAt = new Date(
+      Date.now() + app.vaultboxConfig.downloadTokenExpiresMinutes * 60 * 1000
+    );
+    const token = createDownloadToken();
 
     await prisma.downloadToken.create({
       data: {
-        token,
+        token: token.hash,
         fileId: file.id,
-        userId: user.id,
+        userId: request.user.id,
         expiresAt
       }
     });
 
     await prisma.auditLog.create({
       data: {
-        action: "DOWNLOAD_TOKEN_CREATED",
-        details: file.originalName,
-        userId: user.id,
+        action: "DOWNLOAD_SESSION_CREATED",
+        details: `${file.id}:${file.originalName}`,
+        userId: request.user.id,
         ip: request.ip
       }
     });
 
     return {
-      message: "Download token created",
-      token,
+      message: "Download session created",
+      token: token.raw,
       expiresAt,
-      downloadUrl: `/download/${token}`
+      downloadUrl: `/download/${token.raw}`,
+      capabilities: {
+        resumable: true,
+        parallelRanges: true,
+        acceptRanges: "bytes",
+        suggestedPartBytes: app.vaultboxConfig.downloadSuggestedPartBytes,
+        suggestedParallelRequests: app.vaultboxConfig.downloadMaxRanges,
+        etag: etagForChecksum(file.checksum),
+        size: file.size.toString()
+      }
+    };
+  });
+
+  app.get("/files/:id/download-capabilities", {
+    preHandler: requireAuth,
+    schema: {
+      tags: ["Downloads"],
+      summary: "Inspect file transfer capabilities",
+      security: [{ bearerAuth: [] }]
+    }
+  }, async (request, reply) => {
+    const file = await prisma.file.findFirst({
+      where: { id: request.params.id, userId: request.user.id, status: "ACTIVE" }
+    });
+
+    if (!file) return reply.code(404).send({ message: "File not found" });
+
+    return {
+      fileId: file.id,
+      size: file.size.toString(),
+      etag: etagForChecksum(file.checksum),
+      acceptRanges: "bytes",
+      resumable: true,
+      parallelRanges: true,
+      suggestedPartBytes: app.vaultboxConfig.downloadSuggestedPartBytes,
+      suggestedParallelRequests: app.vaultboxConfig.downloadMaxRanges
     };
   });
 
   app.get("/download/:token", {
     schema: {
       tags: ["Downloads"],
-      summary: "Download a file using a signed token",
+      summary: "Download or resume a file with an optional byte range",
       params: {
         type: "object",
         required: ["token"],
-        properties: {
-          token: { type: "string" }
-        }
+        properties: { token: { type: "string", minLength: 20, maxLength: 200 } }
       }
     }
-  }, async (request, reply) => {
-    const record = await prisma.downloadToken.findUnique({
-      where: { token: request.params.token },
-      include: { file: true, user: true }
-    });
+  }, async (request, reply) => serveDownload(request, reply, false));
 
-    if (!record) return reply.code(404).send({ message: "Invalid download token" });
-    if (record.usedAt) return reply.code(410).send({ message: "Download token has already been used" });
-    if (record.expiresAt < new Date()) return reply.code(410).send({ message: "Download token has expired" });
-    if (record.user.status !== "ACTIVE") return reply.code(403).send({ message: "Account is not active" });
-    if (record.file.status !== "ACTIVE") return reply.code(404).send({ message: "File no longer exists" });
-    if (!fs.existsSync(record.file.path)) return reply.code(404).send({ message: "Stored file missing" });
-
-    await prisma.downloadToken.update({
-      where: { id: record.id },
-      data: { usedAt: new Date() }
-    });
-
-    await prisma.auditLog.create({
-      data: {
-        action: "FILE_DOWNLOADED",
-        details: record.file.originalName,
-        userId: record.userId,
-        ip: request.ip
-      }
-    });
-
-    reply.header("Content-Disposition", `attachment; filename="${record.file.originalName}"`);
-    reply.header("Content-Type", record.file.mimeType || "application/octet-stream");
-
-    return reply.send(fs.createReadStream(path.resolve(record.file.path)));
-  });
+  app.head("/download/:token", {
+    schema: {
+      tags: ["Downloads"],
+      summary: "Inspect download metadata without transferring bytes"
+    }
+  }, async (request, reply) => serveDownload(request, reply, true));
 }
 
 module.exports = downloadRoutes;
