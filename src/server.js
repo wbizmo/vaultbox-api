@@ -5,12 +5,11 @@ if (process.env.NODE_ENV !== "production") {
 const buildApp = require("./app");
 const prisma = require("./lib/prisma");
 const { connectRedis, disconnectRedis, getRedisState } = require("./lib/redis");
-
-const PORT = Number(process.env.PORT) || 4000;
-const HOST = "0.0.0.0";
+const { assertRuntimeConfig } = require("./config/env");
 
 async function start() {
-  const app = buildApp();
+  const config = assertRuntimeConfig();
+  const app = buildApp({ config });
 
   try {
     try {
@@ -25,7 +24,7 @@ async function start() {
       app.log.error({ err: error }, "Redis connection failed; starting with degraded Redis functionality");
     }
 
-    const address = await app.listen({ port: PORT, host: HOST });
+    const address = await app.listen({ port: config.port, host: "0.0.0.0" });
     app.log.info(`VaultBox API running at ${address}`);
 
     const shutdown = async (signal) => {
