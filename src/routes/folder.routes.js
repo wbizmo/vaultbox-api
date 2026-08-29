@@ -1,5 +1,6 @@
 const prisma = require("../lib/prisma");
 const { requireAuth } = require("../middleware/auth");
+const { reserve, complete } = require("../lib/idempotency");
 
 async function folderRoutes(app) {
   app.post("/folders", {
@@ -19,11 +20,28 @@ async function folderRoutes(app) {
     const name = request.body.name.trim();
     if (!name) return reply.code(400).send({ message: "Folder name is required" });
 
+    const idempotencyKey = request.headers["idempotency-key"];
+    const idempotencyPayload = { userId: request.user.id, name };
+    const reservation = await reserve("folder-create", idempotencyKey, idempotencyPayload, 600);
+
+    if (!reservation.acquired) {
+      if (!reservation.samePayload) {
+        return reply.code(422).send({ message: "Idempotency key was already used with a different request" });
+      }
+      if (reservation.replay) {
+        reply.header("Idempotent-Replay", "true");
+        return reply.code(201).send(reservation.replay);
+      }
+      return reply.code(409).send({ message: "An identical request is still in progress" });
+    }
+
     const folder = await prisma.folder.create({
       data: { name, userId: request.user.id }
     });
+    const response = { message: "Folder created successfully", folder };
+    await complete("folder-create", idempotencyKey, idempotencyPayload, response, 600);
 
-    return reply.code(201).send({ message: "Folder created successfully", folder });
+    return reply.code(201).send(response);
   });
 
   app.get("/folders", {
