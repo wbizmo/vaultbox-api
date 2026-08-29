@@ -1,51 +1,24 @@
 const prisma = require("../lib/prisma");
 const { requireAuth } = require("../middleware/auth");
+const { formatBytes } = require("../lib/bytes");
 
-function formatBytes(bytes) {
-  const value = Number(bytes);
-  if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(2)} GB`;
-  if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(2)} MB`;
-  if (value >= 1024) return `${(value / 1024).toFixed(2)} KB`;
-  return `${value} B`;
+function serializePlan(plan) {
+  return {
+    ...plan,
+    storageLimit: plan.storageLimit.toString(),
+    storageLimitFormatted: formatBytes(plan.storageLimit)
+  };
 }
 
 async function planRoutes(app) {
   app.get("/plans", {
     schema: {
       tags: ["Plans"],
-      summary: "List available storage plans",
-      response: {
-        200: {
-          type: "object",
-          properties: {
-            plans: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  id: { type: "string" },
-                  name: { type: "string" },
-                  priceMonthly: { type: "number" },
-                  storageLimit: { type: "string" },
-                  storageLimitFormatted: { type: "string" },
-                  createdAt: { type: "string" }
-                }
-              }
-            }
-          }
-        }
-      }
+      summary: "List available storage plans"
     }
   }, async () => {
     const plans = await prisma.plan.findMany({ orderBy: { priceMonthly: "asc" } });
-
-    return {
-      plans: plans.map((plan) => ({
-        ...plan,
-        storageLimit: plan.storageLimit.toString(),
-        storageLimitFormatted: formatBytes(plan.storageLimit)
-      }))
-    };
+    return { plans: plans.map(serializePlan) };
   });
 
   app.get("/quota", {
@@ -53,26 +26,7 @@ async function planRoutes(app) {
     schema: {
       tags: ["Plans"],
       summary: "Get current user's storage quota",
-      security: [{ bearerAuth: [] }],
-      response: {
-        200: {
-          type: "object",
-          properties: {
-            quota: {
-              type: "object",
-              properties: {
-                plan: { type: "string" },
-                storageUsed: { type: "string" },
-                storageLimit: { type: "string" },
-                storageUsedFormatted: { type: "string" },
-                storageLimitFormatted: { type: "string" },
-                usagePercent: { type: "number" },
-                status: { type: "string" }
-              }
-            }
-          }
-        }
-      }
+      security: [{ bearerAuth: [] }]
     }
   }, async (request) => {
     const user = await prisma.user.findUnique({
@@ -82,7 +36,9 @@ async function planRoutes(app) {
 
     const storageUsed = user.storageUsed || 0n;
     const storageLimit = user.plan?.storageLimit || 0n;
-    const usagePercent = storageLimit > 0n ? Number((storageUsed * 10000n) / storageLimit) / 100 : 0;
+    const usagePercent = storageLimit > 0n
+      ? Number((storageUsed * 10000n) / storageLimit) / 100
+      : 0;
 
     return {
       quota: {
@@ -92,6 +48,7 @@ async function planRoutes(app) {
         storageUsedFormatted: formatBytes(storageUsed),
         storageLimitFormatted: formatBytes(storageLimit),
         usagePercent,
+        availableBytes: (storageLimit > storageUsed ? storageLimit - storageUsed : 0n).toString(),
         status: user.status
       }
     };
@@ -101,26 +58,27 @@ async function planRoutes(app) {
     preHandler: requireAuth,
     schema: {
       tags: ["Plans"],
-      summary: "Switch current user to another plan",
-      security: [{ bearerAuth: [] }],
-      params: {
-        type: "object",
-        required: ["planId"],
-        properties: {
-          planId: { type: "string" }
-        }
-      }
+      summary: "Switch current user to another plan without violating quota",
+      security: [{ bearerAuth: [] }]
     }
   }, async (request, reply) => {
-    const { planId } = request.params;
-
-    const plan = await prisma.plan.findUnique({ where: { id: planId } });
+    const [plan, user] = await Promise.all([
+      prisma.plan.findUnique({ where: { id: request.params.planId } }),
+      prisma.user.findUnique({ where: { id: request.user.id } })
+    ]);
 
     if (!plan) return reply.code(404).send({ message: "Plan not found" });
+    if (BigInt(user.storageUsed) > BigInt(plan.storageLimit)) {
+      return reply.code(409).send({
+        message: "Current storage usage exceeds the selected plan limit",
+        storageUsed: user.storageUsed.toString(),
+        selectedPlanLimit: plan.storageLimit.toString()
+      });
+    }
 
-    const user = await prisma.user.update({
+    const updated = await prisma.user.update({
       where: { id: request.user.id },
-      data: { planId: plan.id, status: "ACTIVE" },
+      data: { planId: plan.id },
       include: { plan: true }
     });
 
@@ -128,19 +86,12 @@ async function planRoutes(app) {
       data: {
         action: "PLAN_CHANGED",
         details: `Changed to ${plan.name} plan`,
-        userId: user.id,
+        userId: updated.id,
         ip: request.ip
       }
     });
 
-    return {
-      message: "Plan updated successfully",
-      plan: {
-        ...user.plan,
-        storageLimit: user.plan.storageLimit.toString(),
-        storageLimitFormatted: formatBytes(user.plan.storageLimit)
-      }
-    };
+    return { message: "Plan updated successfully", plan: serializePlan(updated.plan) };
   });
 }
 
