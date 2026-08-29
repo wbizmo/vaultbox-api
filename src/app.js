@@ -6,6 +6,11 @@ const swagger = require("@fastify/swagger");
 const swaggerUi = require("@fastify/swagger-ui");
 const rateLimit = require("@fastify/rate-limit");
 
+const { getConfig } = require("./config/env");
+const { installErrorHandler } = require("./lib/errors");
+const { installRequestMetrics } = require("./lib/metrics");
+const { installSecurityHeaders } = require("./lib/security");
+
 const systemRoutes = require("./routes/system.routes");
 const authRoutes = require("./routes/auth.routes");
 const userRoutes = require("./routes/user.routes");
@@ -17,30 +22,42 @@ const billingRoutes = require("./routes/billing.routes");
 const adminRoutes = require("./routes/admin.routes");
 const infraRoutes = require("./routes/infra.routes");
 
-function buildApp() {
+function buildApp(options = {}) {
+  const config = options.config || getConfig();
   const app = Fastify({
-    logger: true
+    logger: options.logger ?? true,
+    trustProxy: config.isProduction,
+    requestIdHeader: "x-request-id"
   });
 
+  app.decorate("vaultboxConfig", config);
+
   app.register(cors, {
-    origin: true
+    credentials: true,
+    origin(origin, callback) {
+      if (!origin) return callback(null, true);
+      if (config.corsOrigins.includes(origin)) return callback(null, true);
+      if (!config.isProduction && config.corsOrigins.length === 0) return callback(null, true);
+      return callback(null, false);
+    }
   });
 
   app.register(rateLimit, {
-    max: 120,
+    max: 240,
     timeWindow: "1 minute"
   });
 
   app.register(jwt, {
-    secret: process.env.JWT_SECRET || "dev_secret_change_me",
+    secret: config.jwtSecret || "local-development-only-secret",
     sign: {
-      expiresIn: process.env.JWT_EXPIRES_IN || "7d"
+      expiresIn: config.jwtExpiresIn
     }
   });
 
   app.register(multipart, {
     limits: {
-      fileSize: 100 * 1024 * 1024
+      fileSize: config.maxUploadBytes,
+      files: 1
     }
   });
 
@@ -48,8 +65,8 @@ function buildApp() {
     openapi: {
       info: {
         title: "VaultBox API",
-        description: "Secure cloud storage API with quotas, signed downloads and admin controls.",
-        version: "1.0.0"
+        description: "Secure cloud storage API with quotas, resumable transfers, signed downloads and admin controls.",
+        version: "2.0.0"
       },
       components: {
         securitySchemes: {
@@ -61,13 +78,13 @@ function buildApp() {
         }
       },
       tags: [
-        { name: "System", description: "System and health endpoints" },
+        { name: "System", description: "System, readiness and metrics endpoints" },
         { name: "Auth", description: "Authentication endpoints" },
         { name: "User", description: "Current user endpoints" },
         { name: "Plans", description: "Storage plans and quota management" },
         { name: "Files", description: "File upload, listing and deletion" },
         { name: "Folders", description: "Folder organization endpoints" },
-        { name: "Downloads", description: "Secure signed downloads" },
+        { name: "Downloads", description: "Resumable and range-capable secure downloads" },
         { name: "Billing", description: "Billing simulation and suspension workflow" },
         { name: "Admin", description: "Administrative controls and reports" },
         { name: "Infrastructure", description: "Database and Redis health checks" }
@@ -78,6 +95,10 @@ function buildApp() {
   app.register(swaggerUi, {
     routePrefix: "/docs"
   });
+
+  installRequestMetrics(app);
+  installSecurityHeaders(app);
+  installErrorHandler(app);
 
   app.register(systemRoutes);
   app.register(authRoutes);
