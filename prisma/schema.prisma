@@ -87,7 +87,9 @@ model File {
   tokens DownloadToken[]
 
   @@index([userId, status, createdAt, id])
-  @@index([userId, originalName])
+  @@index([userId, status, updatedAt, id])
+  @@index([userId, status, size, id])
+  @@index([userId, status, originalName, id])
   @@index([folderId])
 }
 
