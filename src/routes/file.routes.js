@@ -8,7 +8,6 @@ const { HashingTransform } = require("../lib/hash-stream");
 const { softDeleteFileWithQuota } = require("../lib/file-delete");
 const { reserveUploadQuota } = require("../lib/quota");
 const { decodeCursor, cursorWhere, cursorOrderBy, finishCursorPage } = require("../lib/pagination");
-const { storage } = require("../lib/storage");
 
 const fileCursorTypes = {
   createdAt: "date",
@@ -32,6 +31,8 @@ function serializeFile(file) {
 }
 
 async function fileRoutes(app) {
+  const storage = app.vaultboxStorage;
+
   app.post("/files/upload", {
     preHandler: requireAuth,
     schema: {
@@ -41,8 +42,6 @@ async function fileRoutes(app) {
       consumes: ["multipart/form-data"]
     }
   }, async (request, reply) => {
-    await storage.ready();
-
     const user = await prisma.user.findUnique({
       where: { id: request.user.id },
       include: { plan: true }
