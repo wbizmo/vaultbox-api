@@ -2,7 +2,10 @@ const prisma = require("../lib/prisma");
 const { requireAuth } = require("../middleware/auth");
 const { requireAdmin } = require("../middleware/admin");
 const { formatBytes } = require("../lib/bytes");
+const { decodeCursor, cursorWhere, cursorOrderBy, finishCursorPage } = require("../lib/pagination");
 const cache = require("../lib/cache");
+
+const createdAtCursor = { sort: "createdAt", order: "desc", type: "date" };
 
 function serializeAdminUser(user) {
   return {
@@ -30,28 +33,35 @@ async function invalidateAccount(userId) {
   await cache.del("auth-user", userId);
 }
 
+function decodeCreatedAtCursor(raw) {
+  return raw ? decodeCursor(raw, createdAtCursor) : null;
+}
+
 async function adminRoutes(app) {
   app.get("/admin/users", {
     preHandler: [requireAuth, requireAdmin],
     schema: {
       tags: ["Admin"],
-      summary: "List users with bounded pagination",
+      summary: "List users with bounded page or cursor pagination",
       security: [{ bearerAuth: [] }],
       querystring: {
         type: "object",
         properties: {
-          page: { type: "integer", minimum: 1 },
+          pagination: { type: "string", enum: ["page", "cursor"] },
+          page: { type: "integer", minimum: 1, maximum: 100 },
+          cursor: { type: "string", maxLength: 1024 },
           limit: { type: "integer", minimum: 1, maximum: 100 },
           status: { type: "string", enum: ["ACTIVE", "SUSPENDED", "DELETED"] },
           search: { type: "string", maxLength: 120 }
         }
       }
     }
-  }, async (request) => {
+  }, async (request, reply) => {
+    const mode = request.query.pagination || "page";
     const page = Number(request.query.page || 1);
     const limit = Number(request.query.limit || 25);
     const search = request.query.search?.trim();
-    const where = {
+    const baseWhere = {
       ...(request.query.status ? { status: request.query.status } : {}),
       ...(search ? {
         OR: [
@@ -61,10 +71,31 @@ async function adminRoutes(app) {
       } : {})
     };
 
+    if (mode === "cursor") {
+      let decoded;
+      try {
+        decoded = decodeCreatedAtCursor(request.query.cursor);
+      } catch {
+        return reply.code(400).send({ message: "Invalid pagination cursor" });
+      }
+
+      const rows = await prisma.user.findMany({
+        where: { AND: [baseWhere, cursorWhere(decoded, createdAtCursor)] },
+        include: { plan: true },
+        orderBy: cursorOrderBy("createdAt", "desc"),
+        take: limit + 1
+      });
+      const result = finishCursorPage(rows, limit, createdAtCursor);
+      return {
+        users: result.items.map(serializeAdminUser),
+        pagination: { ...result.pagination, limit }
+      };
+    }
+
     const [total, users] = await prisma.$transaction([
-      prisma.user.count({ where }),
+      prisma.user.count({ where: baseWhere }),
       prisma.user.findMany({
-        where,
+        where: baseWhere,
         include: { plan: true },
         orderBy: { createdAt: "desc" },
         skip: (page - 1) * limit,
@@ -74,7 +105,7 @@ async function adminRoutes(app) {
 
     return {
       users: users.map(serializeAdminUser),
-      pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) }
+      pagination: { mode: "page", page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) }
     };
   });
 
@@ -194,27 +225,49 @@ async function adminRoutes(app) {
     preHandler: [requireAuth, requireAdmin],
     schema: {
       tags: ["Admin"],
-      summary: "View audit logs with cursor-friendly pagination",
+      summary: "View audit logs with bounded page or cursor pagination",
       security: [{ bearerAuth: [] }],
       querystring: {
         type: "object",
         properties: {
-          page: { type: "integer", minimum: 1 },
+          pagination: { type: "string", enum: ["page", "cursor"] },
+          page: { type: "integer", minimum: 1, maximum: 100 },
+          cursor: { type: "string", maxLength: 1024 },
           limit: { type: "integer", minimum: 1, maximum: 100 },
           action: { type: "string", maxLength: 80 }
         }
       }
     }
-  }, async (request) => {
+  }, async (request, reply) => {
+    const mode = request.query.pagination || "page";
     const page = Number(request.query.page || 1);
     const limit = Number(request.query.limit || 50);
     const where = request.query.action ? { action: request.query.action } : {};
+    const include = { user: { select: { id: true, name: true, email: true, role: true } } };
+
+    if (mode === "cursor") {
+      let decoded;
+      try {
+        decoded = decodeCreatedAtCursor(request.query.cursor);
+      } catch {
+        return reply.code(400).send({ message: "Invalid pagination cursor" });
+      }
+
+      const rows = await prisma.auditLog.findMany({
+        where: { AND: [where, cursorWhere(decoded, createdAtCursor)] },
+        include,
+        orderBy: cursorOrderBy("createdAt", "desc"),
+        take: limit + 1
+      });
+      const result = finishCursorPage(rows, limit, createdAtCursor);
+      return { logs: result.items, pagination: { ...result.pagination, limit } };
+    }
 
     const [total, logs] = await prisma.$transaction([
       prisma.auditLog.count({ where }),
       prisma.auditLog.findMany({
         where,
-        include: { user: { select: { id: true, name: true, email: true, role: true } } },
+        include,
         orderBy: { createdAt: "desc" },
         skip: (page - 1) * limit,
         take: limit
@@ -223,7 +276,7 @@ async function adminRoutes(app) {
 
     return {
       logs,
-      pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) }
+      pagination: { mode: "page", page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) }
     };
   });
 }
