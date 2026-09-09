@@ -5,6 +5,7 @@ const prisma = require("../lib/prisma");
 const { requireAuth } = require("../middleware/auth");
 const { formatBytes } = require("../lib/bytes");
 const { HashingTransform } = require("../lib/hash-stream");
+const { softDeleteFileWithQuota } = require("../lib/file-delete");
 const { storage } = require("../lib/storage");
 const cache = require("../lib/cache");
 
@@ -200,28 +201,8 @@ async function fileRoutes(app) {
       }
     }
   }, async (request, reply) => {
-    const file = await prisma.file.findFirst({
-      where: {
-        id: request.params.id,
-        userId: request.user.id,
-        status: "ACTIVE"
-      }
-    });
-
+    const file = await softDeleteFileWithQuota(request.user.id, request.params.id);
     if (!file) return reply.code(404).send({ message: "File not found" });
-
-    await prisma.$transaction(async (tx) => {
-      await tx.file.update({
-        where: { id: file.id },
-        data: { status: "DELETED" }
-      });
-
-      await tx.$executeRaw`
-        UPDATE "User"
-        SET "storageUsed" = GREATEST("storageUsed" - ${file.size}, 0), "updatedAt" = NOW()
-        WHERE "id" = ${request.user.id}
-      `;
-    });
 
     const removed = await storage.deleteFile(file).catch((error) => {
       request.log.error({ err: error, fileId: file.id }, "Failed to remove stored file bytes");
