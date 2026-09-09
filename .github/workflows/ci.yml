@@ -46,6 +46,9 @@ jobs:
       - name: Syntax check
         run: find src scripts test prisma -name '*.js' -print0 | xargs -0 -n1 node --check
 
+      - name: Lint
+        run: npm run lint
+
       - name: Unit tests
         run: npm test
 
