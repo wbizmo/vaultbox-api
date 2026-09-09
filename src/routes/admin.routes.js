@@ -2,6 +2,7 @@ const prisma = require("../lib/prisma");
 const { requireAuth } = require("../middleware/auth");
 const { requireAdmin } = require("../middleware/admin");
 const { formatBytes } = require("../lib/bytes");
+const { getStorageReport } = require("../lib/storage-report");
 const { decodeCursor, cursorWhere, cursorOrderBy, finishCursorPage } = require("../lib/pagination");
 const cache = require("../lib/cache");
 
@@ -203,19 +204,14 @@ async function adminRoutes(app) {
     preHandler: [requireAuth, requireAdmin],
     schema: { tags: ["Admin"], summary: "Get platform-wide storage report", security: [{ bearerAuth: [] }] }
   }, async () => {
-    const [statusGroups, storage] = await Promise.all([
-      prisma.user.groupBy({ by: ["status"], _count: { _all: true } }),
-      prisma.user.aggregate({ _sum: { storageUsed: true }, _count: { _all: true } })
-    ]);
-
-    const counts = Object.fromEntries(statusGroups.map((group) => [group.status, group._count._all]));
-    const totalStorageUsed = storage._sum.storageUsed || 0n;
+    const report = await getStorageReport();
+    const totalStorageUsed = report.totalStorageUsed || 0n;
 
     return {
-      totalUsers: storage._count._all,
-      activeUsers: counts.ACTIVE || 0,
-      suspendedUsers: counts.SUSPENDED || 0,
-      deletedUsers: counts.DELETED || 0,
+      totalUsers: report.totalUsers,
+      activeUsers: report.activeUsers,
+      suspendedUsers: report.suspendedUsers,
+      deletedUsers: report.deletedUsers,
       totalStorageUsed: totalStorageUsed.toString(),
       totalStorageUsedFormatted: formatBytes(totalStorageUsed)
     };
