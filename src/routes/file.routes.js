@@ -6,6 +6,7 @@ const { requireAuth } = require("../middleware/auth");
 const { formatBytes } = require("../lib/bytes");
 const { HashingTransform } = require("../lib/hash-stream");
 const { softDeleteFileWithQuota } = require("../lib/file-delete");
+const { reserveUploadQuota } = require("../lib/quota");
 const { storage } = require("../lib/storage");
 const cache = require("../lib/cache");
 
@@ -67,23 +68,19 @@ async function fileRoutes(app) {
     const fileSize = hasher.bytes;
     const checksum = hasher.digest();
     let file;
+    let admittedQuota;
 
     try {
-      file = await prisma.$transaction(async (tx) => {
-        const reserved = await tx.$executeRaw`
-          UPDATE "User"
-          SET "storageUsed" = "storageUsed" + ${fileSize}, "updatedAt" = NOW()
-          WHERE "id" = ${user.id}
-            AND "storageUsed" + ${fileSize} <= ${user.plan.storageLimit}
-        `;
+      const committed = await prisma.$transaction(async (tx) => {
+        const reservation = await reserveUploadQuota(user.id, fileSize, tx);
 
-        if (reserved !== 1) {
+        if (!reservation) {
           const quotaError = new Error("Storage quota exceeded");
           quotaError.code = "STORAGE_QUOTA_EXCEEDED";
           throw quotaError;
         }
 
-        return tx.file.create({
+        const created = await tx.file.create({
           data: {
             originalName,
             storedName,
@@ -94,14 +91,25 @@ async function fileRoutes(app) {
             userId: user.id
           }
         });
+
+        return { file: created, reservation };
       });
+
+      file = committed.file;
+      admittedQuota = committed.reservation;
     } catch (error) {
       await storage.delete(storedName).catch(() => false);
 
       if (error.code === "STORAGE_QUOTA_EXCEEDED") {
+        const currentUser = await prisma.user.findUnique({
+          where: { id: user.id },
+          select: { plan: { select: { storageLimit: true } } }
+        });
+        const currentLimit = currentUser?.plan?.storageLimit || 0n;
+
         return reply.code(413).send({
           message: "Storage quota exceeded",
-          storageLimit: user.plan.storageLimit.toString(),
+          storageLimit: currentLimit.toString(),
           attemptedUploadSize: fileSize.toString()
         });
       }
@@ -131,9 +139,9 @@ async function fileRoutes(app) {
       file: serializeFile(file),
       quota: {
         storageUsed: currentUser.storageUsed.toString(),
-        storageLimit: user.plan.storageLimit.toString(),
+        storageLimit: admittedQuota.storageLimit.toString(),
         storageUsedFormatted: formatBytes(currentUser.storageUsed),
-        storageLimitFormatted: formatBytes(user.plan.storageLimit)
+        storageLimitFormatted: formatBytes(admittedQuota.storageLimit)
       }
     });
   });
