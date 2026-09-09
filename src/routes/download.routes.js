@@ -4,6 +4,7 @@ const { storage } = require("../lib/storage");
 const { contentDispositionAttachment } = require("../lib/security");
 const { parseSingleRange, rangeHeader } = require("../lib/range");
 const { createDownloadToken, hashDownloadToken, etagForChecksum } = require("../lib/download-token");
+const { recordFirstDownload } = require("../lib/download-session");
 const { throttlePreHandler } = require("../lib/throttle");
 
 const tokenThrottle = throttlePreHandler(
@@ -15,11 +16,14 @@ const tokenThrottle = throttlePreHandler(
 async function loadDownloadRecord(rawToken) {
   return prisma.downloadToken.findUnique({
     where: { token: hashDownloadToken(rawToken) },
-    include: { file: true, user: true }
+    include: {
+      file: true,
+      user: { select: { status: true } }
+    }
   });
 }
 
-async function validateDownload(request, reply) {
+async function validateDownload(request, reply, checkStorage = false) {
   const record = await loadDownloadRecord(request.params.token);
 
   if (!record) {
@@ -42,30 +46,12 @@ async function validateDownload(request, reply) {
     return null;
   }
 
-  if (!(await storage.existsFile(record.file))) {
+  if (checkStorage && !(await storage.existsFile(record.file))) {
     reply.code(404).send({ message: "Stored file missing" });
     return null;
   }
 
   return record;
-}
-
-async function recordFirstDownload(request, record) {
-  const updated = await prisma.downloadToken.updateMany({
-    where: { id: record.id, usedAt: null },
-    data: { usedAt: new Date() }
-  });
-
-  if (updated.count === 1) {
-    await prisma.auditLog.create({
-      data: {
-        action: "DOWNLOAD_SESSION_STARTED",
-        details: `${record.file.id}:${record.file.originalName}`,
-        userId: record.userId,
-        ip: request.ip
-      }
-    });
-  }
 }
 
 function setDownloadHeaders(reply, file, etag) {
@@ -77,8 +63,20 @@ function setDownloadHeaders(reply, file, etag) {
   reply.header("Last-Modified", file.updatedAt.toUTCString());
 }
 
+async function openDownloadStream(reply, file, options) {
+  try {
+    return await storage.openReadStreamForFile(file, options);
+  } catch (error) {
+    if (error.code === "ENOENT" || error.code === "EACCES") {
+      reply.code(404).send({ message: "Stored file missing" });
+      return null;
+    }
+    throw error;
+  }
+}
+
 async function serveDownload(request, reply, headOnly = false) {
-  const record = await validateDownload(request, reply);
+  const record = await validateDownload(request, reply, headOnly);
   if (!record) return;
 
   const file = record.file;
@@ -99,24 +97,37 @@ async function serveDownload(request, reply, headOnly = false) {
     }
   }
 
-  await recordFirstDownload(request, record);
-
   if (range) {
     reply.code(206);
     reply.header("Content-Range", rangeHeader(range, totalSize));
     reply.header("Content-Length", range.length.toString());
 
-    if (headOnly) return reply.send();
+    if (headOnly) {
+      await recordFirstDownload(record, request.ip);
+      return reply.send();
+    }
 
-    return reply.send(storage.createReadStreamForFile(file, {
+    const stream = await openDownloadStream(reply, file, {
       start: Number(range.start),
       end: Number(range.end)
-    }));
+    });
+    if (!stream) return;
+
+    await recordFirstDownload(record, request.ip);
+    return reply.send(stream);
   }
 
   reply.header("Content-Length", totalSize.toString());
-  if (headOnly) return reply.send();
-  return reply.send(storage.createReadStreamForFile(file));
+  if (headOnly) {
+    await recordFirstDownload(record, request.ip);
+    return reply.send();
+  }
+
+  const stream = await openDownloadStream(reply, file);
+  if (!stream) return;
+
+  await recordFirstDownload(record, request.ip);
+  return reply.send(stream);
 }
 
 async function downloadRoutes(app) {
