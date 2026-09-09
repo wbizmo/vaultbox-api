@@ -1,6 +1,9 @@
 const prisma = require("../lib/prisma");
 const { requireAuth } = require("../middleware/auth");
 const { reserve, complete } = require("../lib/idempotency");
+const { decodeCursor, cursorWhere, cursorOrderBy, finishCursorPage } = require("../lib/pagination");
+
+const folderCursorOptions = { sort: "createdAt", order: "desc", type: "date" };
 
 async function folderRoutes(app) {
   app.post("/folders", {
@@ -48,20 +51,43 @@ async function folderRoutes(app) {
     preHandler: requireAuth,
     schema: {
       tags: ["Folders"],
-      summary: "List folders with pagination",
+      summary: "List folders with bounded page or cursor pagination",
       security: [{ bearerAuth: [] }],
       querystring: {
         type: "object",
         properties: {
-          page: { type: "integer", minimum: 1 },
+          pagination: { type: "string", enum: ["page", "cursor"] },
+          page: { type: "integer", minimum: 1, maximum: 100 },
+          cursor: { type: "string", maxLength: 1024 },
           limit: { type: "integer", minimum: 1, maximum: 100 }
         }
       }
     }
-  }, async (request) => {
+  }, async (request, reply) => {
+    const mode = request.query.pagination || "page";
     const page = Number(request.query.page || 1);
     const limit = Number(request.query.limit || 25);
     const where = { userId: request.user.id };
+
+    if (mode === "cursor") {
+      let decoded = null;
+      if (request.query.cursor) {
+        try {
+          decoded = decodeCursor(request.query.cursor, folderCursorOptions);
+        } catch {
+          return reply.code(400).send({ message: "Invalid pagination cursor" });
+        }
+      }
+
+      const rows = await prisma.folder.findMany({
+        where: { AND: [where, cursorWhere(decoded, folderCursorOptions)] },
+        include: { _count: { select: { files: true } } },
+        orderBy: cursorOrderBy("createdAt", "desc"),
+        take: limit + 1
+      });
+      const result = finishCursorPage(rows, limit, folderCursorOptions);
+      return { folders: result.items, pagination: { ...result.pagination, limit } };
+    }
 
     const [total, folders] = await prisma.$transaction([
       prisma.folder.count({ where }),
@@ -76,7 +102,7 @@ async function folderRoutes(app) {
 
     return {
       folders,
-      pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) }
+      pagination: { mode: "page", page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) }
     };
   });
 
