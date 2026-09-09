@@ -1,8 +1,12 @@
 # VaultBox API
 
-VaultBox is a secure cloud-storage API built with Fastify, Prisma, Neon PostgreSQL, Upstash Redis, and Render. Version 2 focuses on transfer reliability, bounded resource use, observable performance, and security without replacing the existing infrastructure providers.
+VaultBox is a secure cloud-storage API built with Fastify, Prisma, Neon PostgreSQL, Upstash Redis, and Render. **v2.1.0** adds durable resumable chunked uploads and completes an efficiency pass across transfer I/O, quota accounting, database access, Redis coordination, pagination, search, and deployment safety.
 
-> The public Render URL tracks the deployed branch. The v2 capabilities documented here apply after this branch is merged and deployed.
+- Current release: **v2.1.0 — Resumable Upload & Efficiency Release**
+- Changelog: [`CHANGELOG.md`](./CHANGELOG.md)
+- Release notes: [`docs/RELEASE_NOTES_v2.1.0.md`](./docs/RELEASE_NOTES_v2.1.0.md)
+- Upload protocol: [`docs/UPLOADS.md`](./docs/UPLOADS.md)
+- Engineering record: [`docs/V2_ENGINEERING_PLAN.md`](./docs/V2_ENGINEERING_PLAN.md)
 
 ## Live service
 
@@ -11,25 +15,25 @@ VaultBox is a secure cloud-storage API built with Fastify, Prisma, Neon PostgreS
 - Liveness: `https://vaultbox-api-ucff.onrender.com/health`
 - Dependency health: `https://vaultbox-api-ucff.onrender.com/infra/health`
 
-Render may cold-start an inactive free-tier service, so first-request latency on the public URL is not comparable to the in-process benchmark below.
+Render may cold-start an inactive free-tier service, so first-request latency on the public URL is not comparable to the in-process benchmark.
 
-## v2 engineering highlights
+## Transfer engine
 
 ### Resumable, parallel downloads
 
-VaultBox speaks standard HTTP byte-range semantics instead of forcing every file through one uninterrupted sequential stream.
+VaultBox supports standard HTTP byte-range semantics:
 
-- `HEAD` exposes size, ETag, content type, and range support without transferring the file.
-- `Accept-Ranges: bytes` advertises resumability.
-- `Range: bytes=start-end` returns `206 Partial Content`.
-- `Content-Range` identifies exactly which segment was returned.
-- `If-Range` protects resumes against a file changing underneath the client.
-- Strong ETags are derived from the stored SHA-256 checksum.
-- Short-lived download sessions can be reused for range requests until expiry.
-- Download credentials are stored hashed in PostgreSQL rather than as plaintext bearer secrets.
-- Invalid or unsatisfiable ranges return `416 Range Not Satisfiable`.
+- `HEAD` for size/type/ETag discovery without transferring bytes
+- `Accept-Ranges: bytes`
+- `Range: bytes=start-end`
+- `206 Partial Content`
+- `Content-Range`
+- strong SHA-256-backed ETags
+- `If-Range`
+- `416 Range Not Satisfiable`
+- reusable short-lived download sessions with hashed bearer credentials
 
-The repository includes a reference parallel downloader:
+The reference downloader can persist completed ranges, resume after interruption, write directly to final offsets, and verify the completed SHA-256:
 
 ```bash
 node scripts/parallel-download.js \
@@ -39,62 +43,78 @@ node scripts/parallel-download.js \
   8
 ```
 
-The final two arguments are parallel requests and part size in MiB. The client writes ranges directly to their final offsets, maintains `<output>.vaultbox-resume.json`, skips completed segments after a restart, and verifies the completed file against VaultBox's SHA-256 ETag when available.
+The final two arguments are parallel requests and part size in MiB.
 
-### Streaming and resumable uploads
+### Resumable chunked uploads
 
-The original `POST /files/upload` path remains available for simple one-shot uploads. It streams bytes directly to storage and calculates SHA-256 inline, so it does not buffer the whole file or reread it just to hash it.
+Large or interruption-prone uploads use a durable PostgreSQL-backed session protocol:
 
-Large or unreliable transfers can use the resumable upload protocol:
+1. `POST /upload-sessions` — create a session and atomically reserve the expected bytes.
+2. `PUT /upload-sessions/:id/parts/:partNumber` — stream one bounded part with exact `Content-Range` geometry and optional `x-chunk-sha256`.
+3. `GET /upload-sessions/:id` — inspect uploaded and missing parts.
+4. `POST /upload-sessions/:id/complete` — claim completion, stream deterministic assembly, verify final size/checksum, create one file, and convert reserved quota exactly once.
+5. `DELETE /upload-sessions/:id` — abort, remove temporary bytes, and release the reservation.
 
-1. `POST /upload-sessions` with `originalName`, `mimeType`, `expectedSize`, and optional whole-file SHA-256 `checksum`.
-2. VaultBox reserves the expected bytes atomically against the user's current plan and returns a session ID, fixed `chunkSize`, `partCount`, expiry, and suggested parallelism.
-3. `PUT /upload-sessions/:id/parts/:partNumber` sends one multipart file part with an exact `Content-Range: bytes start-end/total`. `x-chunk-sha256` is optional on the first upload and can be used for integrity verification and idempotent retries.
-4. `GET /upload-sessions/:id` reports uploaded and missing part numbers, state, and expiry so an interrupted client can resume only what is missing.
-5. `POST /upload-sessions/:id/complete` validates the complete part set, streams parts to final storage in deterministic order, verifies final size and optional whole-file checksum, then atomically converts reserved bytes into `storageUsed` and creates exactly one `File` record.
-6. `DELETE /upload-sessions/:id` aborts an unfinished session, removes temporary parts, and releases its quota reservation.
+The default recommendation is **8 MiB chunks** and **4 parallel part uploads**. The server never concatenates the complete file in Node memory.
 
-The default recommended chunk size is **8 MiB** with **4 parallel part uploads**. Both are configurable. Parts are streamed with bounded memory; the server never concatenates the complete file in RAM. Part-number uniqueness and exact range geometry prevent overlaps or duplicated bytes. Concurrent completion is claimed atomically, so at most one file is created and quota is charged once.
+Correctness is enforced at multiple layers:
 
-Upload-session and part state lives in PostgreSQL rather than Redis. This keeps resumability durable across application restarts and makes user ownership/BOLA checks part of every session operation. Temporary part bytes stay behind the storage adapter, so a future object-storage multipart implementation can replace local temporary files without changing the public protocol.
+- every session lookup is ownership-scoped;
+- part number is unique per session;
+- exact ranges prevent overlap/duplicate bytes;
+- matching retries are idempotent;
+- conflicting retries are rejected;
+- concurrent completion can create at most one final file;
+- expired/aborted sessions release quota reservations;
+- stale session cleanup tolerates process interruption.
 
-Expired sessions release reserved quota and their temporary chunks are cleaned by lifecycle cleanup. Stale sessions left by a crash are also reconciled by periodic cleanup.
+### Efficient one-shot uploads
 
-### Redis used deliberately
+`POST /files/upload` remains available for simple clients and still hashes SHA-256 inline while streaming.
 
-Redis is connected during startup, closed gracefully during shutdown, and its actual client state and ping latency are reported by `/infra/health`.
+Clients that know the exact file payload size should send:
 
-Redis is used for low-latency ephemeral coordination where failure can safely degrade: short-lived authorization-state caching, distributed throttling, and idempotency state. Neon PostgreSQL remains the source of truth for users, quotas, files, resumable-upload sessions, and audit state.
-
-## Engineering evidence
-
-The benchmark is checked into `scripts/benchmark.js` and runs in CI. Run it with:
-
-```bash
-npm run benchmark
+```http
+x-upload-size: 8388608
 ```
 
-These are in-process control-plane measurements. Public transfer speed is still bounded by the Render instance, storage device, route to the client, and client connection.
+This is the **file byte count**, not multipart `Content-Length`. VaultBox reserves the declared bytes before reading the multipart file or opening storage. A known over-quota request can therefore return `413` without receiving, hashing, and writing the full file.
 
-## Reliability and security changes
+The server-measured stream length remains authoritative:
 
-- Production startup fails closed when `DATABASE_URL` or a sufficiently strong `JWT_SECRET` is missing.
-- Node.js 24 LTS is the supported runtime.
-- CORS is allowlisted through `CORS_ORIGINS` in production.
-- Protected requests verify current account state after JWT validation, so suspended/deleted accounts cannot continue indefinitely with an old token.
-- Redis-backed auth/download/upload throttling falls back safely to bounded local process throttling when Redis is unavailable.
-- Response security headers and safe download filename handling are installed globally.
-- Signed download credentials are redacted from application request logs.
-- Request IDs and `Server-Timing` are emitted for diagnostics.
-- File/folder/admin list paths support bounded pagination and scalable cursor pagination.
-- Substring search uses PostgreSQL trigram indexes while common sort paths have matching composite indexes.
-- Folder deletion moves contained files to the root instead of stranding/deleting them unexpectedly.
-- Plan downgrades account for both committed storage and active upload reservations.
-- Resumable session creation reserves quota atomically, preventing concurrent sessions from oversubscribing a plan.
-- Chunk ranges are deterministic and non-overlapping; part retries are idempotent when the checksum matches.
-- Completion verifies byte count and optional whole-file SHA-256 before atomically creating file metadata and charging storage.
-- Abort/expiry releases reservations and removes temporary upload chunks.
-- Legacy v1 stored filenames remain readable through a path-constrained compatibility boundary.
+- shorter than declared: `422` and reservation release;
+- larger than declared: bounded/truncated and `413`;
+- parser/pipeline/database failure: temporary bytes removed and reservation released;
+- success: reservation converted to `storageUsed` atomically with `File` creation.
+
+Clients that omit `x-upload-size` keep the compatible final quota-check flow.
+
+## Efficiency work in v2.1.0
+
+### Database
+
+- Upload admission checks the plan that is current when the SQL statement executes.
+- `storageUsed + reservedUploadBytes` is kept within the current plan limit for admitted upload/plan transitions.
+- File ACTIVE -> DELETED and quota decrement happen in one ownership-scoped SQL transition.
+- Successful upload responses reuse `UPDATE ... RETURNING` instead of re-reading the user solely for quota display.
+- Admin storage reporting uses one aggregate query.
+- Cursor pagination avoids exact counts and pathological large offsets for scalable collection traversal.
+- `pg_trgm` GIN indexes make substring file/user search indexable without changing API semantics.
+- Composite indexes align with cursor and supported file sort paths.
+
+### Redis and process memory
+
+- Distributed throttle decisions use one Redis Lua `EVAL` round trip.
+- Process-local Redis fallbacks are bounded, TTL-aware stores rather than unbounded Maps.
+- Dead file-cache invalidations with no corresponding cache read path were removed.
+- Redis remains ephemeral coordination; PostgreSQL remains the source of truth.
+
+### Filesystem and transfer paths
+
+- Storage readiness runs once during Fastify startup instead of per upload.
+- Range downloads avoid `access()` followed by open; the read handle is opened directly and missing bytes are mapped safely.
+- Already-started download sessions skip redundant `usedAt IS NULL` writes.
+- One-shot and chunked uploads use streaming SHA-256 and bounded memory.
 
 ## Architecture
 
@@ -103,28 +123,32 @@ Client
   |
   v
 Render / Fastify API
-  |-- auth, validation, quotas, resumable upload/download sessions
-  |-- streaming assembly, HTTP range serving, request timing, health
+  |-- auth + current-account enforcement
+  |-- atomic quota transitions
+  |-- one-shot + resumable upload protocols
+  |-- resumable HTTP range downloads
+  |-- request timing, health and metrics
   |
   +--> Neon PostgreSQL
-  |      users, plans, file metadata, committed + reserved quota,
-  |      upload sessions/parts, download sessions, audit logs
+  |      users, plans, committed/reserved quota,
+  |      files/folders, upload sessions/parts,
+  |      download sessions, audit logs
   |
   +--> Upstash Redis
-  |      ephemeral auth cache, throttling, idempotency
+  |      short-lived auth cache, throttling, idempotency
   |
   +--> Storage adapter
          current provider: Render-local filesystem
          final files + bounded temporary upload parts
 ```
 
-The current provider set is intentionally preserved: **Render + Neon PostgreSQL + Upstash Redis**.
+The provider set is intentionally preserved: **Render + Neon PostgreSQL + Upstash Redis**.
 
-### Storage scaling boundary
+### Storage boundary
 
-The storage adapter removes storage-specific assumptions from route code, but the deployed byte store is still node-local filesystem storage. Unless a durable Render disk is attached, local files may be ephemeral across instance replacement; even with persistent disk, node-local bytes are not horizontally shared like object storage.
+The storage adapter isolates byte-storage assumptions from route/domain logic, but the deployed provider remains node-local Render storage. Unless a durable Render disk is attached, local bytes may be ephemeral across instance replacement; even with persistent disk, node-local bytes are not horizontally shared like object storage.
 
-A future object-storage/CDN backend can be introduced behind the adapter. The resumable API already models upload sessions and numbered parts, which maps naturally to object-storage multipart APIs.
+The upload-session/part model maps naturally to future multipart object-storage APIs, so moving bytes to object storage/CDN does not require redesigning the public transfer protocol.
 
 ## Core API surface
 
@@ -148,22 +172,23 @@ A future object-storage/CDN backend can be introduced behind the adapter. The re
 - `GET /quota`
 - `PATCH /plans/:planId/subscribe`
 
-### Files and folders
+### Files and uploads
 
-- `POST /files/upload` — compatible one-shot streaming upload
+- `POST /files/upload`
 - `GET /files`
 - `DELETE /files/:id`
-- `POST /upload-sessions` — create resumable upload + reserve quota
-- `GET /upload-sessions/:id` — inspect progress/missing parts
-- `PUT /upload-sessions/:id/parts/:partNumber` — stream one exact ranged part
-- `POST /upload-sessions/:id/complete` — assemble, verify and commit
-- `DELETE /upload-sessions/:id` — abort and release reservation
+- `POST /upload-sessions`
+- `GET /upload-sessions/:id`
+- `PUT /upload-sessions/:id/parts/:partNumber`
+- `POST /upload-sessions/:id/complete`
+- `DELETE /upload-sessions/:id`
+
+### Folders
+
 - `POST /folders`
 - `GET /folders`
 - `PATCH /folders/:id`
 - `DELETE /folders/:id`
-
-For upload parts, the server returns the calculated SHA-256 checksum. A retry should send that digest as `x-chunk-sha256`; a different checksum for an already-filled part number is rejected with `409` rather than silently replacing bytes.
 
 ### Downloads
 
@@ -172,15 +197,13 @@ For upload parts, the server returns the calculated SHA-256 checksum. A retry sh
 - `HEAD /download/:token`
 - `GET /download/:token`
 
-`GET /download/:token` accepts standard `Range` and `If-Range` headers.
-
 ### Administration and billing
 
-Administrative user lifecycle, storage reporting, audit-log access, and billing-failure simulation remain available through Swagger.
+Administrative user lifecycle, storage reporting, audit-log access, and billing-failure simulation are documented in Swagger.
 
 ## Configuration
 
-Copy `.env.example` and provide real secrets/URLs:
+Copy `.env.example` and provide real values:
 
 ```env
 PORT=4000
@@ -208,7 +231,7 @@ REDIS_URL=
 REDIS_KEY_PREFIX=vaultbox
 ```
 
-`MAX_UPLOAD_BYTES` is the maximum total file size for both one-shot and resumable uploads. `UPLOAD_CHUNK_BYTES` is bounded by the total upload limit. `UPLOAD_MAX_PARTS` prevents pathological session metadata growth.
+`MAX_UPLOAD_BYTES` bounds both one-shot and resumable file size. `UPLOAD_CHUNK_BYTES` is bounded by the total upload limit and `UPLOAD_MAX_PARTS` prevents pathological metadata growth.
 
 ## Local development
 
@@ -216,8 +239,8 @@ Requirements:
 
 - Node.js 24.x
 - npm 11.x
-- PostgreSQL connection
-- Redis connection is recommended; Redis-dependent optimizations degrade safely when unavailable
+- PostgreSQL
+- Redis recommended; Redis optimizations degrade safely when unavailable
 
 ```bash
 git clone https://github.com/wbizmo/vaultbox-api.git
@@ -239,36 +262,31 @@ npm run benchmark
 npm audit --audit-level=high
 ```
 
-CI provisions PostgreSQL and Redis and performs dependency audit, Prisma generation and migration deployment, JavaScript syntax checks, ESLint, unit/integration tests, and the benchmark. Benchmark and audit JSON are retained as workflow artifacts.
+CI provisions PostgreSQL and Redis and requires dependency audit, Prisma generation, migration deployment, syntax checks, ESLint, unit/integration tests, concurrency coverage, and benchmark evidence before merge.
 
-## Deployment notes
+## Production deployment
 
-Before deploying v2:
-
-1. Use Node.js 24.x on Render.
-2. Set `DATABASE_URL`, `JWT_SECRET`, `REDIS_URL`, and production `CORS_ORIGINS`.
-3. Configure upload chunk/session limits as needed; the defaults are 8 MiB chunks, 60-minute sessions, and four suggested parallel parts.
-4. Run `npm ci`, `npx prisma generate`, and `npx prisma migrate deploy`.
-5. Deploy and confirm `/health` and `/infra/health`.
-6. Exercise a one-shot upload, interrupted/resumed chunked upload, idempotent part retry, completion, abort, ranged download, quota, suspension, and reactivation flow.
-
-## Repository layout
+Render tracks `main` with auto-deploy enabled. The production start contract is deliberately migration-aware:
 
 ```text
-.github/workflows/      CI verification
-prisma/                 schema, seed, migrations
-scripts/benchmark.js    reproducible control-plane benchmark
-scripts/parallel-download.js
-                        resumable parallel reference downloader
-src/config/             validated runtime configuration
-src/lib/                storage, quota, upload/download session, Redis utilities
-src/middleware/         authorization boundaries
-src/routes/             REST endpoints
-test/                   native Node.js unit and integration tests
-docs/                   engineering and upgrade plan
+npm start
+  -> prisma migrate deploy
+  -> node src/server.js
 ```
 
-See `docs/V2_ENGINEERING_PLAN.md` for the provider-preserving upgrade rationale and remaining architectural boundaries.
+Fastify therefore does not bind its public port until committed Prisma migrations have been applied to Neon.
+
+After each production deploy verify:
+
+1. Render deploy status is `live` for the intended commit.
+2. `/health` succeeds.
+3. `/infra/health` reports PostgreSQL and Redis operational state.
+4. Swagger/OpenAPI reports the release version and expected routes.
+5. The production database migration table includes the latest committed migration.
+
+## Release history
+
+See [`CHANGELOG.md`](./CHANGELOG.md) and the versioned release notes in [`docs/`](./docs/).
 
 ## License
 

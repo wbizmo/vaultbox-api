@@ -1,4 +1,4 @@
-name: Publish VaultBox v2.0.0
+name: Publish VaultBox v2.1.0
 
 on:
   push:
@@ -15,18 +15,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Publish v2.0.0 release
+      - name: Publish v2.1.0 release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if gh release view v2.0.0 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "v2.0.0 already exists; leaving the existing release untouched."
+          if gh release view v2.1.0 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "v2.1.0 already exists; leaving the existing release untouched."
             exit 0
           fi
 
-          gh release create v2.0.0 \
+          gh release create v2.1.0 \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "VaultBox API v2.0.0 — Resumable Transfer Engine" \
-            --notes-file docs/RELEASE_NOTES_v2.0.0.md
+            --title "VaultBox API v2.1.0 — Resumable Upload & Efficiency Release" \
+            --notes-file docs/RELEASE_NOTES_v2.1.0.md

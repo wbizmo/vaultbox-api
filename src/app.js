@@ -7,6 +7,7 @@ const swagger = require("@fastify/swagger");
 const swaggerUi = require("@fastify/swagger-ui");
 const rateLimit = require("@fastify/rate-limit");
 
+const { version: appVersion } = require("../package.json");
 const { getConfig } = require("./config/env");
 const { installErrorHandler } = require("./lib/errors");
 const { installRequestMetrics } = require("./lib/metrics");
@@ -73,8 +74,8 @@ function buildApp(options = {}) {
     openapi: {
       info: {
         title: "VaultBox API",
-        description: "Secure cloud storage API with quotas, resumable transfers, signed downloads and admin controls.",
-        version: "2.0.0"
+        description: "Secure cloud storage API with atomic quotas, resumable chunked uploads, range downloads and admin controls.",
+        version: appVersion
       },
       components: {
         securitySchemes: {
