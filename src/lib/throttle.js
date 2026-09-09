@@ -1,14 +1,16 @@
 const { redis } = require("./redis");
 const { key } = require("./cache");
+const { BoundedTtlMap } = require("./bounded-ttl-map");
 
-const localWindows = new Map();
+const localWindows = new BoundedTtlMap({ maxEntries: 10000, cleanupIntervalMs: 30000 });
 
 function localCheck(bucket, limit, windowSeconds) {
   const now = Date.now();
   const current = localWindows.get(bucket);
 
-  if (!current || current.resetAt <= now) {
-    localWindows.set(bucket, { count: 1, resetAt: now + windowSeconds * 1000 });
+  if (!current) {
+    const resetAt = now + windowSeconds * 1000;
+    localWindows.set(bucket, { count: 1, resetAt }, windowSeconds * 1000);
     return { allowed: true, remaining: Math.max(0, limit - 1), retryAfterSeconds: windowSeconds };
   }
 
