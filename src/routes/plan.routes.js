@@ -1,6 +1,7 @@
 const prisma = require("../lib/prisma");
 const { requireAuth } = require("../middleware/auth");
 const { formatBytes } = require("../lib/bytes");
+const { switchPlanIfFits } = require("../lib/quota");
 
 function serializePlan(plan) {
   return {
@@ -62,13 +63,16 @@ async function planRoutes(app) {
       security: [{ bearerAuth: [] }]
     }
   }, async (request, reply) => {
-    const [plan, user] = await Promise.all([
-      prisma.plan.findUnique({ where: { id: request.params.planId } }),
-      prisma.user.findUnique({ where: { id: request.user.id } })
-    ]);
-
+    const plan = await prisma.plan.findUnique({ where: { id: request.params.planId } });
     if (!plan) return reply.code(404).send({ message: "Plan not found" });
-    if (BigInt(user.storageUsed) > BigInt(plan.storageLimit)) {
+
+    const switched = await switchPlanIfFits(request.user.id, plan.id);
+    if (!switched) {
+      const user = await prisma.user.findUnique({
+        where: { id: request.user.id },
+        select: { storageUsed: true }
+      });
+
       return reply.code(409).send({
         message: "Current storage usage exceeds the selected plan limit",
         storageUsed: user.storageUsed.toString(),
@@ -76,22 +80,16 @@ async function planRoutes(app) {
       });
     }
 
-    const updated = await prisma.user.update({
-      where: { id: request.user.id },
-      data: { planId: plan.id },
-      include: { plan: true }
-    });
-
     await prisma.auditLog.create({
       data: {
         action: "PLAN_CHANGED",
         details: `Changed to ${plan.name} plan`,
-        userId: updated.id,
+        userId: request.user.id,
         ip: request.ip
       }
     });
 
-    return { message: "Plan updated successfully", plan: serializePlan(updated.plan) };
+    return { message: "Plan updated successfully", plan: serializePlan(plan) };
   });
 }
 
