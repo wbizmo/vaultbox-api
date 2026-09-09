@@ -18,6 +18,7 @@ const authRoutes = require("./routes/auth.routes");
 const userRoutes = require("./routes/user.routes");
 const planRoutes = require("./routes/plan.routes");
 const fileRoutes = require("./routes/file.routes");
+const uploadRoutes = require("./routes/upload.routes");
 const folderRoutes = require("./routes/folder.routes");
 const downloadRoutes = require("./routes/download.routes");
 const billingRoutes = require("./routes/billing.routes");
@@ -89,7 +90,7 @@ function buildApp(options = {}) {
         { name: "Auth", description: "Authentication endpoints" },
         { name: "User", description: "Current user endpoints" },
         { name: "Plans", description: "Storage plans and quota management" },
-        { name: "Files", description: "File upload, listing and deletion" },
+        { name: "Files", description: "One-shot and resumable file uploads, listing and deletion" },
         { name: "Folders", description: "Folder organization endpoints" },
         { name: "Downloads", description: "Resumable and range-capable secure downloads" },
         { name: "Billing", description: "Billing simulation and suspension workflow" },
@@ -128,6 +129,7 @@ function buildApp(options = {}) {
   app.register(userRoutes);
   app.register(planRoutes);
   app.register(fileRoutes);
+  app.register(uploadRoutes);
   app.register(folderRoutes);
   app.register(downloadRoutes);
   app.register(billingRoutes);
