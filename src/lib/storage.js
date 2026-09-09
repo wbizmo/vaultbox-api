@@ -49,6 +49,11 @@ class LocalStorageAdapter {
     return fs.createReadStream(this.resolveFile(file), options);
   }
 
+  async openReadStreamForFile(file, options = {}) {
+    const handle = await fs.promises.open(this.resolveFile(file), "r");
+    return handle.createReadStream(options);
+  }
+
   async stat(key) {
     return fs.promises.stat(this.resolve(key));
   }
