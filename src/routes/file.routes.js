@@ -53,7 +53,17 @@ async function fileRoutes(app) {
       tags: ["Files"],
       summary: "Stream a file with optional early quota admission via x-upload-size",
       security: [{ bearerAuth: [] }],
-      consumes: ["multipart/form-data"]
+      consumes: ["multipart/form-data"],
+      headers: {
+        type: "object",
+        properties: {
+          "x-upload-size": {
+            type: "string",
+            pattern: "^[0-9]+$",
+            description: "Optional exact file byte count. When supplied, VaultBox reserves quota before reading the multipart file body."
+          }
+        }
+      }
     }
   }, async (request, reply) => {
     const user = await prisma.user.findUnique({
