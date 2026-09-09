@@ -1,8 +1,9 @@
 const crypto = require("crypto");
 const { redis } = require("./redis");
 const { key } = require("./cache");
+const { BoundedTtlMap } = require("./bounded-ttl-map");
 
-const local = new Map();
+const local = new BoundedTtlMap({ maxEntries: 10000, cleanupIntervalMs: 30000 });
 
 function fingerprint(value) {
   return crypto.createHash("sha256").update(JSON.stringify(value ?? null)).digest("hex");
@@ -34,9 +35,8 @@ async function reserve(scope, idempotencyKey, payload, ttlSeconds = 300) {
     };
   }
 
-  const now = Date.now();
   const existing = local.get(redisKey);
-  if (existing && existing.expiresAt > now) {
+  if (existing) {
     return {
       acquired: false,
       samePayload: existing.fingerprint === payloadFingerprint,
@@ -47,9 +47,8 @@ async function reserve(scope, idempotencyKey, payload, ttlSeconds = 300) {
 
   local.set(redisKey, {
     fingerprint: payloadFingerprint,
-    state: "pending",
-    expiresAt: now + ttlSeconds * 1000
-  });
+    state: "pending"
+  }, ttlSeconds * 1000);
 
   return { acquired: true, idempotencyKey, fingerprint: payloadFingerprint };
 }
@@ -69,10 +68,7 @@ async function complete(scope, idempotencyKey, payload, response, ttlSeconds = 3
     return;
   }
 
-  local.set(redisKey, {
-    ...record,
-    expiresAt: Date.now() + ttlSeconds * 1000
-  });
+  local.set(redisKey, record, ttlSeconds * 1000);
 }
 
 module.exports = {
