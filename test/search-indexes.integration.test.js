@@ -81,15 +81,15 @@ test("trigram and sort indexes are deployed", async () => {
   }
 });
 
-test("file substring query can use the trigram index", async () => {
-  const plan = await prisma.$queryRawUnsafe(`
-    SET LOCAL enable_seqscan = off;
-    EXPLAIN (FORMAT JSON)
-    SELECT * FROM "File"
-    WHERE "originalName" ILIKE '%report%'
-  `).catch(() => null);
+test("file substring query is eligible for the trigram index", async () => {
+  const plan = await prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe("SET LOCAL enable_seqscan = off");
+    return tx.$queryRawUnsafe(`
+      EXPLAIN (FORMAT JSON)
+      SELECT * FROM "File"
+      WHERE "originalName" ILIKE '%report%'
+    `);
+  });
 
-  if (plan === null) return;
-  const text = JSON.stringify(plan);
-  assert.match(text, /File_originalName_trgm_idx/);
+  assert.match(JSON.stringify(plan), /File_originalName_trgm_idx/);
 });
