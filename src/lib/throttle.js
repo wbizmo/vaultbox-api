@@ -4,6 +4,16 @@ const { BoundedTtlMap } = require("./bounded-ttl-map");
 
 const localWindows = new BoundedTtlMap({ maxEntries: 10000, cleanupIntervalMs: 30000 });
 
+const throttleScript = `
+local count = redis.call('INCR', KEYS[1])
+local ttl = redis.call('TTL', KEYS[1])
+if ttl < 0 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+  ttl = tonumber(ARGV[1])
+end
+return { count, ttl }
+`;
+
 function localCheck(bucket, limit, windowSeconds) {
   const now = Date.now();
   const current = localWindows.get(bucket);
@@ -22,6 +32,18 @@ function localCheck(bucket, limit, windowSeconds) {
   };
 }
 
+async function redisCheck(bucket, windowSeconds) {
+  const result = await redis.eval(throttleScript, {
+    keys: [bucket],
+    arguments: [String(windowSeconds)]
+  });
+
+  return {
+    count: Number(result[0]),
+    ttl: Number(result[1])
+  };
+}
+
 async function checkThrottle(namespace, identity, { limit, windowSeconds }) {
   const bucket = key(`throttle:${namespace}`, identity);
 
@@ -30,9 +52,7 @@ async function checkThrottle(namespace, identity, { limit, windowSeconds }) {
   }
 
   try {
-    const count = await redis.incr(bucket);
-    if (count === 1) await redis.expire(bucket, windowSeconds);
-    const ttl = await redis.ttl(bucket);
+    const { count, ttl } = await redisCheck(bucket, windowSeconds);
 
     return {
       allowed: count <= limit,
@@ -60,5 +80,6 @@ function throttlePreHandler(namespace, options, identityFactory = (request) => r
 
 module.exports = {
   checkThrottle,
-  throttlePreHandler
+  throttlePreHandler,
+  throttleScript
 };
