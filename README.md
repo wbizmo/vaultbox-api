@@ -17,7 +17,7 @@ Render may cold-start an inactive free-tier service, so first-request latency on
 
 ### Resumable, parallel downloads
 
-VaultBox now speaks standard HTTP byte-range semantics instead of forcing every file through one uninterrupted sequential stream.
+VaultBox speaks standard HTTP byte-range semantics instead of forcing every file through one uninterrupted sequential stream.
 
 - `HEAD` exposes size, ETag, content type, and range support without transferring the file.
 - `Accept-Ranges: bytes` advertises resumability.
@@ -29,7 +29,7 @@ VaultBox now speaks standard HTTP byte-range semantics instead of forcing every 
 - Download credentials are stored hashed in PostgreSQL rather than as plaintext bearer secrets.
 - Invalid or unsatisfiable ranges return `416 Range Not Satisfiable`.
 
-The repository also includes a reference parallel downloader:
+The repository includes a reference parallel downloader:
 
 ```bash
 node scripts/parallel-download.js \
@@ -41,75 +41,59 @@ node scripts/parallel-download.js \
 
 The final two arguments are parallel requests and part size in MiB. The client writes ranges directly to their final offsets, maintains `<output>.vaultbox-resume.json`, skips completed segments after a restart, and verifies the completed file against VaultBox's SHA-256 ETag when available.
 
-This is the protocol foundation required for download-manager-style throughput and recovery after network interruption. Actual Internet throughput remains bounded by the Render instance, storage device, route to the client, and client connection; VaultBox does not claim CDN or MEGA-scale global throughput from a single application instance.
+### Streaming and resumable uploads
 
-### Streaming uploads
+The original `POST /files/upload` path remains available for simple one-shot uploads. It streams bytes directly to storage and calculates SHA-256 inline, so it does not buffer the whole file or reread it just to hash it.
 
-Uploads no longer write a file and then read the whole file back into memory to hash it. SHA-256 is calculated while bytes are streamed to storage. This removes the v1 full-file reread and avoids memory use proportional to file size.
+Large or unreliable transfers can use the resumable upload protocol:
 
-Quota reservation is also atomic at the PostgreSQL layer, preventing concurrent uploads from independently passing the same stale quota check.
+1. `POST /upload-sessions` with `originalName`, `mimeType`, `expectedSize`, and optional whole-file SHA-256 `checksum`.
+2. VaultBox reserves the expected bytes atomically against the user's current plan and returns a session ID, fixed `chunkSize`, `partCount`, expiry, and suggested parallelism.
+3. `PUT /upload-sessions/:id/parts/:partNumber` sends one multipart file part with an exact `Content-Range: bytes start-end/total`. `x-chunk-sha256` is optional on the first upload and can be used for integrity verification and idempotent retries.
+4. `GET /upload-sessions/:id` reports uploaded and missing part numbers, state, and expiry so an interrupted client can resume only what is missing.
+5. `POST /upload-sessions/:id/complete` validates the complete part set, streams parts to final storage in deterministic order, verifies final size and optional whole-file checksum, then atomically converts reserved bytes into `storageUsed` and creates exactly one `File` record.
+6. `DELETE /upload-sessions/:id` aborts an unfinished session, removes temporary parts, and releases its quota reservation.
 
-### Redis repaired and used deliberately
+The default recommended chunk size is **8 MiB** with **4 parallel part uploads**. Both are configurable. Parts are streamed with bounded memory; the server never concatenates the complete file in RAM. Part-number uniqueness and exact range geometry prevent overlaps or duplicated bytes. Concurrent completion is claimed atomically, so at most one file is created and quota is charged once.
 
-The Redis "offline" status was caused by two application wiring defects introduced during the TLS/client-lifecycle refactor:
+Upload-session and part state lives in PostgreSQL rather than Redis. This keeps resumability durable across application restarts and makes user ownership/BOLA checks part of every session operation. Temporary part bytes stay behind the storage adapter, so a future object-storage multipart implementation can replace local temporary files without changing the public protocol.
 
-1. `src/lib/redis.js` changed from exporting a Redis client directly to exporting `{ redis, connectRedis }`, while the infrastructure route still called `.ping()` on the module wrapper.
-2. The server startup path never called `connectRedis()`, so the explicit Upstash client was not opened.
+Expired sessions release reserved quota and their temporary chunks are cleaned by lifecycle cleanup. Stale sessions left by a crash are also reconciled by periodic cleanup.
 
-v2 fixes both defects while keeping Upstash. Redis is connected during startup, closed gracefully during shutdown, and its actual client state and ping latency are reported by `/infra/health`.
+### Redis used deliberately
 
-Redis is used for low-latency ephemeral coordination where failure can safely degrade: short-lived authorization-state caching, distributed throttling, and idempotency state. Neon PostgreSQL remains the source of truth.
+Redis is connected during startup, closed gracefully during shutdown, and its actual client state and ping latency are reported by `/infra/health`.
+
+Redis is used for low-latency ephemeral coordination where failure can safely degrade: short-lived authorization-state caching, distributed throttling, and idempotency state. Neon PostgreSQL remains the source of truth for users, quotas, files, resumable-upload sessions, and audit state.
 
 ## Engineering evidence
 
-The README reports measured figures only. The benchmark is checked into `scripts/benchmark.js` and runs in CI so the numbers can be reproduced rather than hand-written.
-
-Validated on **2026-08-29** using GitHub Actions `ubuntu-24.04`, **Node.js 24.19.0**, 5,000 Fastify-inject requests to `/health`, concurrency 32:
-
-| Metric | Result |
-| --- | ---: |
-| Requests | 5,000 |
-| Concurrency | 32 |
-| Total benchmark duration | 283.92 ms |
-| Throughput | 17,610.86 req/s |
-| Minimum latency | 0.450 ms |
-| p50 latency | 1.577 ms |
-| p95 latency | 3.817 ms |
-| p99 latency | 8.383 ms |
-| Maximum latency | 12.650 ms |
-| Average latency | 1.814 ms |
-| Errors | 0 |
-| Unit tests | 13/13 passing |
-| Dependency audit | 0 known vulnerabilities in the validated lockfile |
-
-These are **in-process control-plane measurements**. They intentionally exclude public-Internet latency, Render cold starts, Neon query latency, Upstash latency, file-system I/O, and file-transfer bandwidth. `/infra/health` separately measures database and Redis dependency latency at runtime.
-
-Run the same benchmark locally with:
+The benchmark is checked into `scripts/benchmark.js` and runs in CI. Run it with:
 
 ```bash
 npm run benchmark
 ```
 
-The parallel downloader prints its own observed `throughputMiBPerSecond`, which is the correct place to measure real transfer speed for a specific host/network path.
+These are in-process control-plane measurements. Public transfer speed is still bounded by the Render instance, storage device, route to the client, and client connection.
 
 ## Reliability and security changes
 
 - Production startup fails closed when `DATABASE_URL` or a sufficiently strong `JWT_SECRET` is missing.
-- Node.js 24 LTS replaces the EOL Node.js 20 runtime.
+- Node.js 24 LTS is the supported runtime.
 - CORS is allowlisted through `CORS_ORIGINS` in production.
-- Protected requests verify the current database-backed account state after JWT validation, so suspended/deleted accounts cannot continue indefinitely with an old token.
-- Short-lived Redis caching avoids turning that enforcement into unnecessary database load.
-- Authentication endpoints normalize email identities and use stronger password validation and bcrypt cost 12.
-- Redis-backed auth/download throttling falls back safely to local process throttling when Redis is unavailable.
+- Protected requests verify current account state after JWT validation, so suspended/deleted accounts cannot continue indefinitely with an old token.
+- Redis-backed auth/download/upload throttling falls back safely to bounded local process throttling when Redis is unavailable.
 - Response security headers and safe download filename handling are installed globally.
 - Signed download credentials are redacted from application request logs.
 - Request IDs and `Server-Timing` are emitted for diagnostics.
-- File/folder/admin list paths use bounded pagination instead of unbounded result sets.
+- File/folder/admin list paths support bounded pagination and scalable cursor pagination.
+- Substring search uses PostgreSQL trigram indexes while common sort paths have matching composite indexes.
 - Folder deletion moves contained files to the root instead of stranding/deleting them unexpectedly.
-- Plan downgrades are refused when current usage exceeds the destination plan.
-- Folder creation supports idempotency keys.
-- Administrative storage reporting uses aggregation rather than loading every user into application memory.
-- Query-path indexes cover common owner/status/time access patterns.
+- Plan downgrades account for both committed storage and active upload reservations.
+- Resumable session creation reserves quota atomically, preventing concurrent sessions from oversubscribing a plan.
+- Chunk ranges are deterministic and non-overlapping; part retries are idempotent when the checksum matches.
+- Completion verifies byte count and optional whole-file SHA-256 before atomically creating file metadata and charging storage.
+- Abort/expiry releases reservations and removes temporary upload chunks.
 - Legacy v1 stored filenames remain readable through a path-constrained compatibility boundary.
 
 ## Architecture
@@ -119,27 +103,28 @@ Client
   |
   v
 Render / Fastify API
-  |-- auth, validation, quotas, transfer sessions, HTTP range serving
-  |-- request timing, health, security controls
+  |-- auth, validation, quotas, resumable upload/download sessions
+  |-- streaming assembly, HTTP range serving, request timing, health
   |
   +--> Neon PostgreSQL
-  |      users, plans, file metadata, quotas, download sessions, audit logs
+  |      users, plans, file metadata, committed + reserved quota,
+  |      upload sessions/parts, download sessions, audit logs
   |
   +--> Upstash Redis
-  |      ephemeral auth cache, throttling, idempotency, operational coordination
+  |      ephemeral auth cache, throttling, idempotency
   |
   +--> Storage adapter
          current provider: Render-local filesystem
-         streaming reads/writes and range reads
+         final files + bounded temporary upload parts
 ```
 
 The current provider set is intentionally preserved: **Render + Neon PostgreSQL + Upstash Redis**.
 
 ### Storage scaling boundary
 
-The new storage adapter removes storage-specific assumptions from route code, but the deployed byte store is still node-local filesystem storage. Unless a durable Render disk is attached, local files may be ephemeral across instance replacement; even with persistent disk, node-local bytes are not horizontally shared like object storage. Parallel range support can saturate a single host more efficiently, but it cannot manufacture bandwidth beyond that host's network/disk ceiling.
+The storage adapter removes storage-specific assumptions from route code, but the deployed byte store is still node-local filesystem storage. Unless a durable Render disk is attached, local files may be ephemeral across instance replacement; even with persistent disk, node-local bytes are not horizontally shared like object storage.
 
-A future object-storage/CDN backend can be introduced behind the adapter without redesigning the HTTP transfer surface, if the infrastructure strategy changes later.
+A future object-storage/CDN backend can be introduced behind the adapter. The resumable API already models upload sessions and numbered parts, which maps naturally to object-storage multipart APIs.
 
 ## Core API surface
 
@@ -165,13 +150,20 @@ A future object-storage/CDN backend can be introduced behind the adapter without
 
 ### Files and folders
 
-- `POST /files/upload`
+- `POST /files/upload` — compatible one-shot streaming upload
 - `GET /files`
 - `DELETE /files/:id`
+- `POST /upload-sessions` — create resumable upload + reserve quota
+- `GET /upload-sessions/:id` — inspect progress/missing parts
+- `PUT /upload-sessions/:id/parts/:partNumber` — stream one exact ranged part
+- `POST /upload-sessions/:id/complete` — assemble, verify and commit
+- `DELETE /upload-sessions/:id` — abort and release reservation
 - `POST /folders`
 - `GET /folders`
 - `PATCH /folders/:id`
 - `DELETE /folders/:id`
+
+For upload parts, the server returns the calculated SHA-256 checksum. A retry should send that digest as `x-chunk-sha256`; a different checksum for an already-filled part number is rejected with `409` rather than silently replacing bytes.
 
 ### Downloads
 
@@ -184,7 +176,7 @@ A future object-storage/CDN backend can be introduced behind the adapter without
 
 ### Administration and billing
 
-Administrative user lifecycle, storage reporting, audit-log access, and billing-failure simulation remain available through the documented routes in Swagger.
+Administrative user lifecycle, storage reporting, audit-log access, and billing-failure simulation remain available through Swagger.
 
 ## Configuration
 
@@ -204,6 +196,10 @@ APP_URL=http://localhost:4000
 CORS_ORIGINS=http://localhost:3000,http://localhost:5173
 
 MAX_UPLOAD_BYTES=104857600
+UPLOAD_CHUNK_BYTES=8388608
+UPLOAD_SESSION_EXPIRES_MINUTES=60
+UPLOAD_MAX_PARTS=10000
+UPLOAD_SUGGESTED_PARALLEL_PARTS=4
 DOWNLOAD_TOKEN_EXPIRES_MINUTES=15
 DOWNLOAD_MAX_RANGES=8
 DOWNLOAD_SUGGESTED_PART_BYTES=8388608
@@ -212,7 +208,7 @@ REDIS_URL=
 REDIS_KEY_PREFIX=vaultbox
 ```
 
-Provider values remain normal connection strings supplied by Neon and Upstash; the application does not rewrite a configured Redis scheme.
+`MAX_UPLOAD_BYTES` is the maximum total file size for both one-shot and resumable uploads. `UPLOAD_CHUNK_BYTES` is bounded by the total upload limit. `UPLOAD_MAX_PARTS` prevents pathological session metadata growth.
 
 ## Local development
 
@@ -237,24 +233,24 @@ npm run dev
 ## Verification
 
 ```bash
+npm run lint
 npm test
 npm run benchmark
-npm audit
+npm audit --audit-level=high
 ```
 
-CI additionally performs Prisma generation, JavaScript syntax checks, a dependency security gate, the unit suite, and the benchmark. Benchmark and audit JSON are retained as workflow artifacts.
+CI provisions PostgreSQL and Redis and performs dependency audit, Prisma generation and migration deployment, JavaScript syntax checks, ESLint, unit/integration tests, and the benchmark. Benchmark and audit JSON are retained as workflow artifacts.
 
 ## Deployment notes
 
 Before deploying v2:
 
 1. Use Node.js 24.x on Render.
-2. Set `DATABASE_URL`, `JWT_SECRET`, `REDIS_URL`, and the production `CORS_ORIGINS` allowlist.
-3. Run `npm ci` and `npx prisma generate`.
-4. Run `npx prisma migrate deploy` for the new query indexes.
-5. Deploy the application and confirm `/health` and `/infra/health`.
-6. Regenerate any pre-v2 outstanding download token after rollout; v2 stores token hashes rather than v1 plaintext token values.
-7. Exercise one full upload, ranged download, interrupted/resumed download, delete, quota, suspension, and reactivation flow in the deployed environment.
+2. Set `DATABASE_URL`, `JWT_SECRET`, `REDIS_URL`, and production `CORS_ORIGINS`.
+3. Configure upload chunk/session limits as needed; the defaults are 8 MiB chunks, 60-minute sessions, and four suggested parallel parts.
+4. Run `npm ci`, `npx prisma generate`, and `npx prisma migrate deploy`.
+5. Deploy and confirm `/health` and `/infra/health`.
+6. Exercise a one-shot upload, interrupted/resumed chunked upload, idempotent part retry, completion, abort, ranged download, quota, suspension, and reactivation flow.
 
 ## Repository layout
 
@@ -265,10 +261,10 @@ scripts/benchmark.js    reproducible control-plane benchmark
 scripts/parallel-download.js
                         resumable parallel reference downloader
 src/config/             validated runtime configuration
-src/lib/                storage, Redis, range, metrics, security utilities
+src/lib/                storage, quota, upload/download session, Redis utilities
 src/middleware/         authorization boundaries
 src/routes/             REST endpoints
-test/                   native Node.js unit tests
+test/                   native Node.js unit and integration tests
 docs/                   engineering and upgrade plan
 ```
 
