@@ -13,6 +13,10 @@ function parseList(value) {
 
 function getConfig() {
   const nodeEnv = process.env.NODE_ENV || "development";
+  const maxUploadBytes = parseInteger(process.env.MAX_UPLOAD_BYTES, 100 * 1024 * 1024, {
+    min: 1024,
+    max: 10 * 1024 * 1024 * 1024
+  });
 
   return {
     nodeEnv,
@@ -23,9 +27,19 @@ function getConfig() {
     databaseUrl: process.env.DATABASE_URL || "",
     appUrl: process.env.APP_URL || "http://localhost:4000",
     corsOrigins: parseList(process.env.CORS_ORIGINS),
-    maxUploadBytes: parseInteger(process.env.MAX_UPLOAD_BYTES, 100 * 1024 * 1024, {
-      min: 1024,
-      max: 10 * 1024 * 1024 * 1024
+    maxUploadBytes,
+    uploadChunkBytes: parseInteger(process.env.UPLOAD_CHUNK_BYTES, 8 * 1024 * 1024, {
+      min: 256 * 1024,
+      max: Math.min(maxUploadBytes, 128 * 1024 * 1024)
+    }),
+    uploadSessionExpiresMinutes: parseInteger(process.env.UPLOAD_SESSION_EXPIRES_MINUTES, 60, {
+      min: 5,
+      max: 1440
+    }),
+    uploadMaxParts: parseInteger(process.env.UPLOAD_MAX_PARTS, 10000, { min: 1, max: 10000 }),
+    uploadSuggestedParallelParts: parseInteger(process.env.UPLOAD_SUGGESTED_PARALLEL_PARTS, 4, {
+      min: 1,
+      max: 16
     }),
     downloadTokenExpiresMinutes: parseInteger(process.env.DOWNLOAD_TOKEN_EXPIRES_MINUTES, 15, {
       min: 1,
