@@ -11,6 +11,7 @@ const { getConfig } = require("./config/env");
 const { installErrorHandler } = require("./lib/errors");
 const { installRequestMetrics } = require("./lib/metrics");
 const { installSecurityHeaders, redactRequestUrl } = require("./lib/security");
+const { storage } = require("./lib/storage");
 
 const systemRoutes = require("./routes/system.routes");
 const authRoutes = require("./routes/auth.routes");
@@ -25,6 +26,7 @@ const infraRoutes = require("./routes/infra.routes");
 
 function buildApp(options = {}) {
   const config = options.config || getConfig();
+  const storageAdapter = options.storage || storage;
   const app = Fastify({
     logger: options.logger ?? true,
     trustProxy: config.isProduction,
@@ -34,6 +36,10 @@ function buildApp(options = {}) {
   });
 
   app.decorate("vaultboxConfig", config);
+  app.decorate("vaultboxStorage", storageAdapter);
+  app.addHook("onReady", async () => {
+    await storageAdapter.ready();
+  });
 
   app.register(cors, {
     credentials: true,
