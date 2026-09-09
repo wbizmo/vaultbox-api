@@ -23,23 +23,33 @@ enum FileStatus {
   DELETED
 }
 
-model User {
-  id          String     @id @default(cuid())
-  name        String
-  email       String     @unique
-  password    String
-  role        UserRole   @default(USER)
-  status      UserStatus @default(ACTIVE)
-  planId      String?
-  storageUsed BigInt     @default(0)
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
+enum UploadSessionStatus {
+  UPLOADING
+  COMPLETING
+  COMPLETED
+  ABORTED
+  EXPIRED
+}
 
-  plan      Plan?           @relation(fields: [planId], references: [id])
-  files     File[]
-  folders   Folder[]
-  tokens    DownloadToken[]
-  auditLogs AuditLog[]
+model User {
+  id                  String     @id @default(cuid())
+  name                String
+  email               String     @unique
+  password            String
+  role                UserRole   @default(USER)
+  status              UserStatus @default(ACTIVE)
+  planId              String?
+  storageUsed         BigInt     @default(0)
+  reservedUploadBytes BigInt     @default(0)
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+
+  plan           Plan?           @relation(fields: [planId], references: [id])
+  files          File[]
+  folders        Folder[]
+  tokens         DownloadToken[]
+  auditLogs      AuditLog[]
+  uploadSessions UploadSession[]
 
   @@index([status, createdAt, id])
   @@index([createdAt, id])
@@ -108,6 +118,46 @@ model DownloadToken {
   @@index([userId, expiresAt])
   @@index([fileId, expiresAt])
   @@index([expiresAt])
+}
+
+model UploadSession {
+  id               String              @id @default(cuid())
+  userId           String
+  originalName     String
+  mimeType         String
+  expectedSize     BigInt
+  expectedChecksum String?
+  chunkSize        Int
+  partCount        Int
+  status           UploadSessionStatus @default(UPLOADING)
+  expiresAt        DateTime
+  fileId           String?             @unique
+  completedAt      DateTime?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  user  User         @relation(fields: [userId], references: [id])
+  parts UploadPart[]
+
+  @@index([userId, status, expiresAt])
+  @@index([status, expiresAt])
+  @@index([userId, createdAt])
+}
+
+model UploadPart {
+  id         String   @id @default(cuid())
+  sessionId  String
+  partNumber Int
+  offset     BigInt
+  size       BigInt
+  checksum   String
+  storedName String
+  createdAt  DateTime @default(now())
+
+  session UploadSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, partNumber])
+  @@index([sessionId, offset])
 }
 
 model AuditLog {
