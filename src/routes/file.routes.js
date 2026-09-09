@@ -7,8 +7,16 @@ const { formatBytes } = require("../lib/bytes");
 const { HashingTransform } = require("../lib/hash-stream");
 const { softDeleteFileWithQuota } = require("../lib/file-delete");
 const { reserveUploadQuota } = require("../lib/quota");
+const { decodeCursor, cursorWhere, cursorOrderBy, finishCursorPage } = require("../lib/pagination");
 const { storage } = require("../lib/storage");
 const cache = require("../lib/cache");
+
+const fileCursorTypes = {
+  createdAt: "date",
+  updatedAt: "date",
+  size: "bigint",
+  originalName: "string"
+};
 
 function serializeFile(file) {
   return {
@@ -150,12 +158,14 @@ async function fileRoutes(app) {
     preHandler: requireAuth,
     schema: {
       tags: ["Files"],
-      summary: "List current user's files with bounded pagination",
+      summary: "List current user's files with bounded page or cursor pagination",
       security: [{ bearerAuth: [] }],
       querystring: {
         type: "object",
         properties: {
-          page: { type: "integer", minimum: 1, maximum: 1000000 },
+          pagination: { type: "string", enum: ["page", "cursor"] },
+          page: { type: "integer", minimum: 1, maximum: 100 },
+          cursor: { type: "string", maxLength: 1024 },
           limit: { type: "integer", minimum: 1, maximum: 100 },
           search: { type: "string", maxLength: 120 },
           sort: { type: "string", enum: ["createdAt", "updatedAt", "size", "originalName"] },
@@ -163,22 +173,47 @@ async function fileRoutes(app) {
         }
       }
     }
-  }, async (request) => {
+  }, async (request, reply) => {
+    const mode = request.query.pagination || "page";
     const page = Number(request.query.page || 1);
     const limit = Number(request.query.limit || 25);
     const search = request.query.search?.trim();
     const sort = request.query.sort || "createdAt";
     const order = request.query.order || "desc";
-    const where = {
+    const baseWhere = {
       userId: request.user.id,
       status: "ACTIVE",
       ...(search ? { originalName: { contains: search, mode: "insensitive" } } : {})
     };
 
+    if (mode === "cursor") {
+      const options = { sort, order, type: fileCursorTypes[sort] };
+      let decoded = null;
+      if (request.query.cursor) {
+        try {
+          decoded = decodeCursor(request.query.cursor, options);
+        } catch {
+          return reply.code(400).send({ message: "Invalid pagination cursor" });
+        }
+      }
+
+      const rows = await prisma.file.findMany({
+        where: { AND: [baseWhere, cursorWhere(decoded, options)] },
+        orderBy: cursorOrderBy(sort, order),
+        take: limit + 1
+      });
+      const result = finishCursorPage(rows, limit, options);
+
+      return {
+        files: result.items.map(serializeFile),
+        pagination: { ...result.pagination, limit }
+      };
+    }
+
     const [total, files] = await prisma.$transaction([
-      prisma.file.count({ where }),
+      prisma.file.count({ where: baseWhere }),
       prisma.file.findMany({
-        where,
+        where: baseWhere,
         orderBy: { [sort]: order },
         skip: (page - 1) * limit,
         take: limit
@@ -188,6 +223,7 @@ async function fileRoutes(app) {
     return {
       files: files.map(serializeFile),
       pagination: {
+        mode: "page",
         page,
         limit,
         total,
