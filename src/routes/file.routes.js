@@ -9,7 +9,6 @@ const { softDeleteFileWithQuota } = require("../lib/file-delete");
 const { reserveUploadQuota } = require("../lib/quota");
 const { decodeCursor, cursorWhere, cursorOrderBy, finishCursorPage } = require("../lib/pagination");
 const { storage } = require("../lib/storage");
-const cache = require("../lib/cache");
 
 const fileCursorTypes = {
   createdAt: "date",
@@ -130,17 +129,14 @@ async function fileRoutes(app) {
       select: { storageUsed: true }
     });
 
-    await Promise.all([
-      prisma.auditLog.create({
-        data: {
-          action: "FILE_UPLOADED",
-          details: `${file.id}:${originalName}`,
-          userId: user.id,
-          ip: request.ip
-        }
-      }),
-      cache.del("file-list", user.id)
-    ]);
+    await prisma.auditLog.create({
+      data: {
+        action: "FILE_UPLOADED",
+        details: `${file.id}:${originalName}`,
+        userId: user.id,
+        ip: request.ip
+      }
+    });
 
     return reply.code(201).send({
       message: "File uploaded successfully",
@@ -253,18 +249,14 @@ async function fileRoutes(app) {
       return false;
     });
 
-    await Promise.all([
-      prisma.auditLog.create({
-        data: {
-          action: removed ? "FILE_DELETED" : "FILE_DELETED_METADATA_ONLY",
-          details: `${file.id}:${file.originalName}`,
-          userId: request.user.id,
-          ip: request.ip
-        }
-      }),
-      cache.del("file", file.id),
-      cache.del("file-list", request.user.id)
-    ]);
+    await prisma.auditLog.create({
+      data: {
+        action: removed ? "FILE_DELETED" : "FILE_DELETED_METADATA_ONLY",
+        details: `${file.id}:${file.originalName}`,
+        userId: request.user.id,
+        ip: request.ip
+      }
+    });
 
     return { message: "File deleted successfully" };
   });
