@@ -7,6 +7,7 @@
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
     "build": "echo build skipped",
+    "lint": "npx --yes eslint@10.10.0 src scripts test prisma",
     "test": "node --test",
     "benchmark": "node scripts/benchmark.js",
     "deploy:migrate": "npx prisma migrate deploy",
