@@ -13,6 +13,7 @@ module.exports = [
         clearInterval: "readonly",
         clearTimeout: "readonly",
         console: "readonly",
+        fetch: "readonly",
         module: "readonly",
         process: "readonly",
         require: "readonly",
