@@ -6,7 +6,12 @@ const { requireAuth } = require("../middleware/auth");
 const { formatBytes } = require("../lib/bytes");
 const { HashingTransform } = require("../lib/hash-stream");
 const { softDeleteFileWithQuota } = require("../lib/file-delete");
-const { reserveUploadQuota } = require("../lib/quota");
+const {
+  reserveUploadQuota,
+  reservePendingUploadQuota,
+  releaseUploadReservation,
+  commitUploadReservation
+} = require("../lib/quota");
 const { decodeCursor, cursorWhere, cursorOrderBy, finishCursorPage } = require("../lib/pagination");
 
 const fileCursorTypes = {
@@ -30,6 +35,15 @@ function serializeFile(file) {
   };
 }
 
+function declaredUploadSize(request, maxUploadBytes) {
+  const raw = request.headers["x-upload-size"];
+  if (raw === undefined) return null;
+  if (!/^\d+$/.test(String(raw))) return NaN;
+  const size = Number(raw);
+  if (!Number.isSafeInteger(size) || size < 1 || size > maxUploadBytes) return NaN;
+  return BigInt(size);
+}
+
 async function fileRoutes(app) {
   const storage = app.vaultboxStorage;
 
@@ -37,9 +51,19 @@ async function fileRoutes(app) {
     preHandler: requireAuth,
     schema: {
       tags: ["Files"],
-      summary: "Stream a file to storage with atomic quota enforcement",
+      summary: "Stream a file with optional early quota admission via x-upload-size",
       security: [{ bearerAuth: [] }],
-      consumes: ["multipart/form-data"]
+      consumes: ["multipart/form-data"],
+      headers: {
+        type: "object",
+        properties: {
+          "x-upload-size": {
+            type: "string",
+            pattern: "^[0-9]+$",
+            description: "Optional exact file byte count. When supplied, VaultBox reserves quota before reading the multipart file body."
+          }
+        }
+      }
     }
   }, async (request, reply) => {
     const user = await prisma.user.findUnique({
@@ -51,8 +75,45 @@ async function fileRoutes(app) {
       return reply.code(403).send({ message: "No active storage plan found" });
     }
 
-    const data = await request.file();
-    if (!data) return reply.code(400).send({ message: "No file uploaded" });
+    const expectedSize = declaredUploadSize(request, app.vaultboxConfig.maxUploadBytes);
+    if (typeof expectedSize === "number" && Number.isNaN(expectedSize)) {
+      return reply.code(400).send({
+        message: "x-upload-size must be a positive integer within the configured upload limit"
+      });
+    }
+
+    let reservationHeld = false;
+    const releaseEarlyReservation = async () => {
+      if (!reservationHeld) return;
+      reservationHeld = false;
+      await releaseUploadReservation(user.id, expectedSize).catch(() => null);
+    };
+
+    if (expectedSize !== null) {
+      const reserved = await reservePendingUploadQuota(user.id, expectedSize);
+      if (!reserved) {
+        return reply.code(413).send({
+          message: "Storage quota exceeded",
+          attemptedUploadSize: expectedSize.toString(),
+          storageLimit: user.plan.storageLimit.toString()
+        });
+      }
+      reservationHeld = true;
+    }
+
+    let data;
+    try {
+      data = expectedSize === null
+        ? await request.file()
+        : await request.file({ limits: { fileSize: Number(expectedSize), files: 1 } });
+    } catch (error) {
+      await releaseEarlyReservation();
+      throw error;
+    }
+    if (!data) {
+      await releaseEarlyReservation();
+      return reply.code(400).send({ message: "No file uploaded" });
+    }
 
     const originalName = String(data.filename || "upload").slice(0, 255);
     const mimeType = String(data.mimetype || "application/octet-stream").slice(0, 255);
@@ -63,26 +124,44 @@ async function fileRoutes(app) {
       await pipeline(data.file, hasher, storage.createWriteStream(storedName));
     } catch (error) {
       await storage.delete(storedName).catch(() => false);
+      await releaseEarlyReservation();
       throw error;
     }
 
     if (data.file.truncated) {
       await storage.delete(storedName).catch(() => false);
-      return reply.code(413).send({ message: "Upload exceeds the configured file-size limit" });
+      await releaseEarlyReservation();
+      return reply.code(413).send({ message: "Upload exceeds its declared or configured file-size limit" });
     }
 
     const fileSize = hasher.bytes;
     const checksum = hasher.digest();
+    if (expectedSize !== null && fileSize !== expectedSize) {
+      await storage.delete(storedName).catch(() => false);
+      await releaseEarlyReservation();
+      return reply.code(422).send({
+        message: "Uploaded byte count does not match x-upload-size",
+        declaredSize: expectedSize.toString(),
+        actualSize: fileSize.toString()
+      });
+    }
+
     let file;
     let admittedQuota;
 
     try {
       const committed = await prisma.$transaction(async (tx) => {
-        const reservation = await reserveUploadQuota(user.id, fileSize, tx);
+        const reservation = expectedSize === null
+          ? await reserveUploadQuota(user.id, fileSize, tx)
+          : await commitUploadReservation(user.id, fileSize, tx);
 
         if (!reservation) {
-          const quotaError = new Error("Storage quota exceeded");
-          quotaError.code = "STORAGE_QUOTA_EXCEEDED";
+          const quotaError = new Error(
+            expectedSize === null ? "Storage quota exceeded" : "Upload reservation is no longer valid"
+          );
+          quotaError.code = expectedSize === null
+            ? "STORAGE_QUOTA_EXCEEDED"
+            : "UPLOAD_RESERVATION_INVALID";
           throw quotaError;
         }
 
@@ -103,8 +182,10 @@ async function fileRoutes(app) {
 
       file = committed.file;
       admittedQuota = committed.reservation;
+      reservationHeld = false;
     } catch (error) {
       await storage.delete(storedName).catch(() => false);
+      await releaseEarlyReservation();
 
       if (error.code === "STORAGE_QUOTA_EXCEEDED") {
         const currentUser = await prisma.user.findUnique({
@@ -118,6 +199,9 @@ async function fileRoutes(app) {
           storageLimit: currentLimit.toString(),
           attemptedUploadSize: fileSize.toString()
         });
+      }
+      if (error.code === "UPLOAD_RESERVATION_INVALID") {
+        return reply.code(409).send({ message: error.message });
       }
 
       throw error;
