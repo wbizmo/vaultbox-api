@@ -123,11 +123,6 @@ async function fileRoutes(app) {
       throw error;
     }
 
-    const currentUser = await prisma.user.findUnique({
-      where: { id: user.id },
-      select: { storageUsed: true }
-    });
-
     await prisma.auditLog.create({
       data: {
         action: "FILE_UPLOADED",
@@ -141,9 +136,9 @@ async function fileRoutes(app) {
       message: "File uploaded successfully",
       file: serializeFile(file),
       quota: {
-        storageUsed: currentUser.storageUsed.toString(),
+        storageUsed: admittedQuota.storageUsed.toString(),
         storageLimit: admittedQuota.storageLimit.toString(),
-        storageUsedFormatted: formatBytes(currentUser.storageUsed),
+        storageUsedFormatted: formatBytes(admittedQuota.storageUsed),
         storageLimitFormatted: formatBytes(admittedQuota.storageLimit)
       }
     });
