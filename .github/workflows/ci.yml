@@ -28,9 +28,19 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       NODE_ENV: test
       DATABASE_URL: postgresql://benchmark:benchmark@127.0.0.1:5432/benchmark
+      REDIS_URL: redis://127.0.0.1:6379
       JWT_SECRET: ci-only-secret-that-is-long-enough-for-tests
     steps:
       - name: Checkout
