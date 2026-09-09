@@ -1,3 +1,4 @@
+const { version } = require("../../package.json");
 const { snapshotMetrics } = require("../lib/metrics");
 const { requireAuth } = require("../middleware/auth");
 const { requireAdmin } = require("../middleware/admin");
@@ -11,9 +12,10 @@ async function systemRoutes(app) {
     }
   }, async () => ({
     name: "VaultBox API",
-    version: "2.0.0",
-    status: "running",
-    docs: "/docs"
+    version,
+    status: "operational",
+    docs: "/docs",
+    health: "/health"
   }));
 
   app.get("/health", {
@@ -25,7 +27,7 @@ async function systemRoutes(app) {
   }, async () => ({
     status: "ok",
     service: "vaultbox-api",
-    version: "2.0.0",
+    version,
     uptimeSeconds: Number(process.uptime().toFixed(2)),
     timestamp: new Date().toISOString()
   }));
