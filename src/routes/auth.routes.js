@@ -1,6 +1,5 @@
 const bcrypt = require("bcryptjs");
 const prisma = require("../lib/prisma");
-const cache = require("../lib/cache");
 const { throttlePreHandler } = require("../lib/throttle");
 
 const registerThrottle = throttlePreHandler("register", { limit: 8, windowSeconds: 600 });
@@ -101,7 +100,7 @@ async function authRoutes(app) {
       }
     });
 
-    const token = app.jwt.sign({ id: user.id, email: user.email, role: user.role });
+    const token = app.jwt.sign({ id: user.id, email: user.email, role: user.role, av: user.authVersion });
     return reply.code(201).send({ message: "Account created successfully", token, user: publicUser(user) });
   });
 
@@ -132,19 +131,14 @@ async function authRoutes(app) {
     const passwordMatches = await bcrypt.compare(request.body.password, user.password);
     if (!passwordMatches) return reply.code(401).send({ message: "Invalid email or password" });
 
-    await Promise.all([
-      prisma.auditLog.create({
-        data: { action: "LOGIN", userId: user.id, ip: request.ip }
-      }),
-      cache.setJson("auth-user", user.id, {
-        id: user.id,
-        email: user.email,
-        role: user.role,
-        status: user.status
-      }, 10)
-    ]);
+    await prisma.auditLog.create({
+      data: { action: "LOGIN", userId: user.id, ip: request.ip }
+    });
 
-    const token = app.jwt.sign({ id: user.id, email: user.email, role: user.role });
+    // Sign with the session version read together with the status we just checked. If the account
+    // is suspended/deleted/demoted between that read and now, the version moves on and this token
+    // is already dead -- a racing login can never mint a reusable credential.
+    const token = app.jwt.sign({ id: user.id, email: user.email, role: user.role, av: user.authVersion });
     return reply.send({ message: "Login successful", token, user: publicUser(user) });
   });
 }

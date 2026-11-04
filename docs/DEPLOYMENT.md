@@ -55,6 +55,22 @@ Upload/download controls can be tuned with:
 - `DOWNLOAD_MAX_RANGES`
 - `DOWNLOAD_SUGGESTED_PART_BYTES`
 
+## Account suspension and session revocation
+
+**Guarantee.** Authentication reads the account's status, role and *session version* (`User.authVersion`) from PostgreSQL on every request; nothing about authorization is cached in Redis or in process memory. Once a suspension, deletion, demotion or session revocation has committed, the **next request on every instance is rejected** — revocation latency is zero and does not depend on Redis being up. Requests that already passed authentication before the change are covered by the commit-time account check (#45).
+
+**How tokens are bound.** Every JWT carries the session version it was issued under (claim `av`). Suspending, reactivating, deleting or changing the role of an account increments `authVersion` in the same statement as the change, so all tokens issued earlier are rejected with `401 Session is no longer valid` — including after reactivation or demotion: affected users must sign in again. A login that races a suspension signs the version it read together with the status it checked, so the token it mints is already stale if the account changed in between. Tokens issued before this release have no claim and are treated as version 0, so existing sessions keep working until the account is revoked. JWT expiry is unchanged.
+
+**Changing roles or revoking sessions by hand.** Use `src/lib/account.js` (`setAccountStatus`, `setAccountRole`, `revokeSessions`) or, in SQL, bump the version with the change so existing tokens die:
+
+```sql
+UPDATE "User" SET "role" = 'USER', "authVersion" = "authVersion" + 1 WHERE "email" = 'former-admin@example.com';
+```
+
+(A role changed without the bump still takes effect immediately, because the role is read from the database on each request, but the account's older tokens stay valid at the new privilege.)
+
+**Cost.** One primary-key lookup per authenticated request, replacing the previous 10-second Redis cache.
+
 ## Plan entitlements and billing webhook
 
 `PATCH /plans/:planId/subscribe` no longer lets any authenticated user select a paid plan. A plan with `priceMonthly > 0` is activated only when the user holds an `ACTIVE`, in-period `PlanEntitlement` for that exact plan, checked in the same SQL statement that switches the plan and verifies `storageUsed + reservedUploadBytes` fits the new limit. Free plans remain self-service.
@@ -88,8 +104,10 @@ Before this release any user could self-select the seeded Basic/Pro plans. The s
 The production database must include migrations through:
 
 ```text
-20261104240000_idempotency_keys
+20261104250000_user_auth_version
 ```
+
+(`20261104240000_idempotency_keys` and earlier migrations precede it.) `20261104250000_user_auth_version` adds one `NOT NULL DEFAULT 0` integer column to `User` (a metadata-only change in PostgreSQL 11+). Previous-build instances ignore it, so the migration is safe to apply before the new code starts.
 
 (`20261104230000_upload_reservations` and earlier migrations precede it.) `20261104240000_idempotency_keys` adds the additive `IdempotencyKey` table only.
 
