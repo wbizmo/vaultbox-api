@@ -304,6 +304,9 @@ async function cleanupUploadSessions(storage, client = prisma) {
     if (released) await storage.deleteUploadSessionChunks(session.id).catch(() => {});
   }
 
+  // One-shot upload reservations share this sweeper (lazy require: upload-reservation imports this module).
+  await require("./upload-reservation").reconcileExpiredReservations(client).catch(() => 0);
+
   const terminal = await client.uploadSession.findMany({
     where: {
       status: { in: ["COMPLETED", "ABORTED", "EXPIRED"] },

@@ -79,6 +79,7 @@ async function fixture(t, storageLimit) {
     await app.close();
     await prisma.auditLog.deleteMany({ where: { userId: user.id } });
     await prisma.downloadToken.deleteMany({ where: { userId: user.id } });
+    await prisma.uploadReservation.deleteMany({ where: { userId: user.id } });
     await prisma.uploadSession.deleteMany({ where: { userId: user.id } });
     await prisma.file.deleteMany({ where: { userId: user.id } });
     await prisma.user.deleteMany({ where: { id: user.id } });
