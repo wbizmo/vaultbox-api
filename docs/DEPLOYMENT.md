@@ -46,6 +46,7 @@ Upload/download controls can be tuned with:
 - `UPLOAD_CHUNK_BYTES`
 - `UPLOAD_SESSION_EXPIRES_MINUTES`
 - `IDEMPOTENCY_LOCK_TIMEOUT_MS` (default 5000; how long an identical in-flight request is waited for before the caller gets 409 + `Retry-After`)
+- `IDEMPOTENCY_MAX_CONCURRENT` (default 3; maximum idempotent transactions per process allowed to hold a database connection at once)
 - `UPLOAD_RESERVATION_LEASE_SECONDS` (default 120; lease for one-shot upload reservations, renewed while the upload is alive)
 - `UPLOAD_COMPLETION_LEASE_SECONDS` (default 120; lease renewed by heartbeat during completion)
 - `UPLOAD_MAX_PARTS`
@@ -92,7 +93,9 @@ The production database must include migrations through:
 
 (`20261104230000_upload_reservations` and earlier migrations precede it.) `20261104240000_idempotency_keys` adds the additive `IdempotencyKey` table only.
 
-**Idempotency now lives in PostgreSQL.** Folder-creation idempotency no longer uses Redis, so Redis outages, restarts and multiple replicas cannot cause duplicate execution; Redis is used only for the auth cache and throttling. Records expire after 24 hours and are pruned by the shared 5-minute sweeper. Retries made *during* a rolling deploy against an instance still on the previous build use the old per-process fallback and are not deduplicated against the new store.
+**Idempotency now lives in PostgreSQL.** Folder-creation idempotency no longer uses Redis, so Redis outages, restarts and multiple replicas cannot cause duplicate execution; Redis is used only for the auth cache and throttling. Records expire after 24 hours and are pruned by the shared 5-minute sweeper. Identical in-flight requests are serialised by a transaction-scoped advisory lock and only that wait is bounded by `IDEMPOTENCY_LOCK_TIMEOUT_MS`, so the timeout never fires because of an unrelated lock on the user row. Each process lets at most `IDEMPOTENCY_MAX_CONCURRENT` idempotent transactions hold a pooled connection; further duplicates queue in memory (holding no connection) and replay once they run, so a burst of duplicates behind a slow original cannot exhaust the Prisma pool. Keep `IDEMPOTENCY_MAX_CONCURRENT` below the pool size configured on `DATABASE_URL` (`connection_limit`, Prisma's default is `num_cpus * 2 + 1`). A committed, unexpired record is replayed with a plain read and no transaction.
+
+Retries made *during* a rolling deploy against an instance still on the previous build use the old per-process fallback and are not deduplicated against the new store.
 
 (`20261104220000_upload_completion_lease` and earlier migrations precede it.) `20261104230000_upload_reservations` adds the additive `UploadReservation` table and enum only.
 

@@ -13,7 +13,9 @@ const {
   runIdempotent,
   validateIdempotencyKey,
   pruneExpiredIdempotencyKeys,
-  fingerprint
+  fingerprint,
+  createGate,
+  MAX_CONCURRENT
 } = require("../src/lib/idempotency");
 
 const JWT_SECRET = "idempotency-test-secret-long-enough-for-tests";
@@ -36,7 +38,7 @@ const config = {
   downloadMaxRanges: 4
 };
 
-async function fixture(t, userCount = 2) {
+async function fixture(t, userCount = 2, configOverrides = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "vaultbox-idem-"));
   const plan = await prisma.plan.create({
     data: { name: `idem-${crypto.randomUUID()}`, priceMonthly: 0, storageLimit: 1000n }
@@ -47,7 +49,7 @@ async function fixture(t, userCount = 2) {
       data: { name: `Idem ${i}`, email: `idem-${crypto.randomUUID()}@example.com`, password: "x", planId: plan.id }
     }));
   }
-  const app = buildApp({ config, storage: new LocalStorageAdapter(root), logger: false });
+  const app = buildApp({ config: { ...config, ...configOverrides }, storage: new LocalStorageAdapter(root), logger: false });
   await app.ready();
   const ids = users.map((user) => user.id);
   const auth = (user) => ({ authorization: `Bearer ${app.jwt.sign({ id: user.id })}` });
@@ -123,7 +125,9 @@ test("same user, same key and payload replays the original result without creati
 });
 
 test("100 parallel identical retries across two separate processes produce exactly one folder", async (t) => {
-  const f = await fixture(t, 1);
+  // The production-default duplicate wait: the fixture's 400 ms default exists to exercise the 409 path
+  // and would legitimately answer "retry shortly" for queued duplicates when the machine is saturated.
+  const f = await fixture(t, 1, { idempotencyLockTimeoutMs: 5000 });
   const [user] = f.users;
 
   const worker = fork(path.join(__dirname, "..", "scripts", "app-worker.js"), [], {
@@ -338,4 +342,123 @@ test("correctness does not depend on Redis: the PostgreSQL path works with Redis
   const [a, b, c] = await Promise.all([1, 2, 3].map(() => f.create(user, "plain", key)));
   assert.deepEqual([a, b, c].map((r) => r.statusCode), [201, 201, 201]);
   assert.equal(new Set([a, b, c].map((r) => r.json().folder.id)).size, 1);
+});
+
+test("an unrelated lock on the User row is waited out, never reported as an in-progress duplicate (no false 409)", async (t) => {
+  const f = await fixture(t, 1); // lock timeout is 400 ms
+  const [user] = f.users;
+
+  let release;
+  const hold = new Promise((resolve) => { release = resolve; });
+  let locked;
+  const lockedSignal = new Promise((resolve) => { locked = resolve; });
+  // e.g. an upload or plan transaction holding the user row, which blocks foreign-key checks.
+  const holder = prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${user.id} FOR UPDATE`;
+    locked();
+    await hold;
+  });
+  await lockedSignal;
+
+  let settled = false;
+  const pending = f.create(user, "behind-user-lock", "user-lock-key").then((res) => { settled = true; return res; });
+  await new Promise((resolve) => setTimeout(resolve, 900)); // well past the 400 ms duplicate-wait timeout
+  assert.equal(settled, false, "the request must keep waiting on the user lock, not give up with a 409");
+
+  release();
+  await holder;
+  const res = await pending;
+  assert.equal(res.statusCode, 201, res.body);
+  assert.equal((await f.folders(user)).length, 1);
+});
+
+test("a burst of same-key duplicates holds a bounded number of pooled connections while an original is slow", async (t) => {
+  const f = await fixture(t, 1, { idempotencyLockTimeoutMs: 5000 });
+  const [user] = f.users;
+  const key = "burst";
+
+  let release;
+  const hold = new Promise((resolve) => { release = resolve; });
+  let claimed;
+  const claimedSignal = new Promise((resolve) => { claimed = resolve; });
+  const owner = runIdempotent({
+    userId: user.id, operation: "folder.create", key, payload: { name: "burst" }, lockTimeoutMs: 5000,
+    execute: async (tx) => {
+      const folder = await tx.folder.create({ data: { name: "burst", userId: user.id } });
+      claimed();
+      await hold;
+      return { status: 201, body: { message: "Folder created successfully", folder } };
+    }
+  });
+  await claimedSignal;
+
+  const duplicates = Array.from({ length: 12 }, () => f.create(user, "burst", key));
+  await new Promise((resolve) => setTimeout(resolve, 400));
+
+  const [{ waiting }] = await prisma.$queryRaw`
+    SELECT COUNT(*)::int AS waiting FROM pg_locks WHERE locktype = 'advisory' AND NOT granted
+  `;
+  assert.ok(waiting >= 1, "some duplicates are genuinely waiting on the in-flight original");
+  assert.ok(waiting <= MAX_CONCURRENT - 1, `at most ${MAX_CONCURRENT - 1} duplicates may hold a connection, saw ${waiting}`);
+
+  release();
+  const original = await owner;
+  const replies = await Promise.all(duplicates);
+  assert.ok(replies.every((r) => r.statusCode === 201), replies.map((r) => r.statusCode).join());
+  assert.equal(new Set(replies.map((r) => r.json().folder.id)).size, 1);
+  assert.equal(replies[0].json().folder.id, original.body.folder.id);
+  assert.equal((await f.folders(user)).length, 1);
+});
+
+test("a committed record is replayed without opening a transaction", async (t) => {
+  const f = await fixture(t, 1);
+  const [user] = f.users;
+  const args = {
+    userId: user.id, operation: "folder.create", key: "fast-path", payload: { name: "fast" },
+    execute: async (tx) => ({ status: 201, body: { folder: await tx.folder.create({ data: { name: "fast", userId: user.id } }) } })
+  };
+  const first = await runIdempotent(args);
+  const noTransactions = {
+    idempotencyKey: prisma.idempotencyKey,
+    $transaction: () => { throw new Error("replay must not open a transaction"); }
+  };
+  const replay = await runIdempotent({ ...args, client: noTransactions });
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.body.folder.id, first.body.folder.id);
+  const mismatch = await runIdempotent({ ...args, payload: { name: "other" }, client: noTransactions });
+  assert.equal(mismatch.mismatch, true);
+});
+
+test("the concurrency gate caps active holders, queues the rest in order without holding anything, and bounds waiting", async () => {
+  const gate = createGate({ concurrency: 2, maxQueue: 2 });
+  const order = [];
+  const r1 = await gate.acquire(1000);
+  const r2 = await gate.acquire(1000);
+  assert.equal(gate.active, 2);
+
+  const w1 = gate.acquire(1000).then((release) => { order.push("w1"); return release; });
+  const w2 = gate.acquire(1000).then((release) => { order.push("w2"); return release; });
+  assert.equal(gate.queued, 2);
+  await assert.rejects(gate.acquire(1000), (error) => error.code === "IDEMPOTENCY_IN_PROGRESS", "queue is bounded");
+
+  r1();
+  const rw1 = await w1;
+  assert.deepEqual(order, ["w1"], "FIFO");
+  assert.equal(gate.active, 2);
+  r2();
+  const rw2 = await w2;
+  assert.deepEqual(order, ["w1", "w2"]);
+  rw1();
+  rw2();
+  assert.equal(gate.active, 0);
+  assert.equal(gate.queued, 0);
+
+  // A waiter that is not served in time gives up with the documented in-progress error.
+  const slow = createGate({ concurrency: 1, maxQueue: 5 });
+  const held = await slow.acquire(1000);
+  await assert.rejects(slow.acquire(60), (error) => error.code === "IDEMPOTENCY_IN_PROGRESS");
+  assert.equal(slow.queued, 0, "the timed-out waiter left the queue");
+  held();
+  const again = await slow.acquire(1000);
+  again();
 });

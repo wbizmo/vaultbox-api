@@ -21,7 +21,66 @@ const prisma = require("./prisma");
  *
  * A concurrent identical request waits for the first to commit and replays its result; if the wait
  * exceeds the lock timeout the caller receives IDEMPOTENCY_IN_PROGRESS (HTTP 409 + Retry-After).
+ *
+ * Waiting is deliberately narrow:
+ *  - Same-key requests are serialised by a transaction-scoped advisory lock taken FIRST, and the lock
+ *    timeout applies only to that wait. It is cleared afterwards, so a timeout can only mean "an
+ *    identical request is still running" -- never a wait on the User row that the claim's and the
+ *    folder's foreign-key checks may take behind unrelated quota transactions.
+ *  - A bounded in-process gate limits how many idempotent transactions may hold a pooled connection
+ *    at once; further callers queue in memory (no connection held) and replay as soon as they run.
+ *  - A committed, unexpired record is replayed by a plain read without opening a transaction.
  */
+
+/** Bounded concurrency gate: waiters queue in memory and hold no database connection. */
+function createGate({ concurrency = 3, maxQueue = 256 } = {}) {
+  let active = 0;
+  const queue = [];
+  const next = () => {
+    while (active < concurrency && queue.length > 0) {
+      const waiter = queue.shift();
+      clearTimeout(waiter.timer);
+      active += 1;
+      waiter.resolve(() => {
+        active -= 1;
+        next();
+      });
+    }
+  };
+  return {
+    get active() { return active; },
+    get queued() { return queue.length; },
+    acquire(timeoutMs) {
+      if (active < concurrency && queue.length === 0) {
+        active += 1;
+        return Promise.resolve(() => {
+          active -= 1;
+          next();
+        });
+      }
+      if (queue.length >= maxQueue) return Promise.reject(inProgressError());
+      return new Promise((resolve, reject) => {
+        const waiter = { resolve };
+        waiter.timer = setTimeout(() => {
+          const index = queue.indexOf(waiter);
+          if (index >= 0) queue.splice(index, 1);
+          reject(inProgressError());
+        }, timeoutMs);
+        waiter.timer.unref?.();
+        queue.push(waiter);
+      });
+    }
+  };
+}
+
+function inProgressError() {
+  const error = new Error("An identical request is still in progress");
+  error.code = "IDEMPOTENCY_IN_PROGRESS";
+  return error;
+}
+
+const MAX_CONCURRENT = Math.max(1, Number.parseInt(process.env.IDEMPOTENCY_MAX_CONCURRENT || "", 10) || 3);
+const gate = createGate({ concurrency: MAX_CONCURRENT });
 
 const KEY_PATTERN = /^[A-Za-z0-9._:~-]{1,128}$/;
 const DEFAULT_TTL_SECONDS = 24 * 60 * 60;
@@ -75,17 +134,33 @@ async function runIdempotent({
   execute,
   ttlSeconds = DEFAULT_TTL_SECONDS,
   lockTimeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
-  client = prisma
+  client = prisma,
+  gate: activeGate = gate
 }) {
   const requestFingerprint = fingerprint(payload);
   const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
+  const timeoutMs = Math.max(1, Math.floor(lockTimeoutMs));
 
+  // Fast path: a committed, unexpired record is replayed by a plain read (no transaction, no gate).
+  const known = await client.idempotencyKey.findUnique({
+    where: { userId_operation_key: { userId, operation, key } }
+  });
+  if (known && known.expiresAt > new Date() && known.status !== null) {
+    if (known.fingerprint !== requestFingerprint) return { mismatch: true };
+    return { replayed: true, status: known.status, body: known.response };
+  }
+
+  const release = await activeGate.acquire(timeoutMs);
   try {
     return await client.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${Math.max(1, Math.floor(lockTimeoutMs))}ms'`);
+      // 1. Serialise identical requests. ONLY this wait is bounded by the lock timeout.
+      await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${timeoutMs}ms'`);
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`${userId}|${operation}|${key}`}, 0))`;
+      // 2. Everything after runs without the timeout, like any other write in the system.
+      await tx.$executeRawUnsafe("SET LOCAL lock_timeout = 0");
 
-      // Claim, or take over an EXPIRED record. A live unexpired record conflicts and returns no row;
-      // a concurrent uncommitted claim makes this statement wait for its outcome.
+      // Claim, or take over an EXPIRED record. The advisory lock guarantees no identical request is
+      // mid-flight, so a conflict here is always against a committed record.
       const claimed = await tx.$queryRaw`
         INSERT INTO "IdempotencyKey" ("id", "userId", "operation", "key", "fingerprint", "expiresAt")
         VALUES (${crypto.randomUUID()}, ${userId}, ${operation}, ${key}, ${requestFingerprint}, ${expiresAt})
@@ -122,12 +197,12 @@ async function runIdempotent({
       return { replayed: false, status: outcome.status, body };
     }, { maxWait: 15000, timeout: 30000 });
   } catch (error) {
-    if (isLockTimeout(error)) {
-      const inProgress = new Error("An identical request is still in progress");
-      inProgress.code = "IDEMPOTENCY_IN_PROGRESS";
-      throw inProgress;
-    }
+    // The timeout is only ever armed around the advisory-lock wait, so this really means
+    // "an identical request is still running".
+    if (isLockTimeout(error)) throw inProgressError();
     throw error;
+  } finally {
+    release();
   }
 }
 
@@ -144,6 +219,8 @@ async function pruneExpiredIdempotencyKeys(client = prisma, { limit = 500, grace
 
 module.exports = {
   KEY_PATTERN,
+  createGate,
+  MAX_CONCURRENT,
   fingerprint,
   validateIdempotencyKey,
   runIdempotent,
