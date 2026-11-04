@@ -13,10 +13,17 @@ const {
   validateChecksum,
   missingPartNumbers,
   assertCompleteParts,
+  lockUserForUpdate,
   releaseSession,
+  claimCompletion,
+  relinquishCompletion,
+  startLeaseHeartbeat,
+  recoverStaleCompletion,
+  isStaleCompletion,
   expireIfNeeded,
   cleanupUploadSessions
 } = require("../lib/upload-session");
+const { retryOnConflict } = require("../lib/db-retry");
 const { throttlePreHandler } = require("../lib/throttle");
 
 const createThrottle = throttlePreHandler(
@@ -29,6 +36,12 @@ const partThrottle = throttlePreHandler(
   { limit: 240, windowSeconds: 60 },
   (request) => request.user?.id || request.ip
 );
+
+function leaseLostError() {
+  const error = new Error("Upload completion lease was lost");
+  error.code = "UPLOAD_COMPLETION_LEASE_LOST";
+  return error;
+}
 
 function serializePart(part) {
   return {
@@ -360,6 +373,16 @@ async function uploadRoutes(app) {
       const response = await completedResponse(request.user.id, session);
       return response || reply.code(409).send({ message: "Completed upload file is unavailable" });
     }
+    if (isStaleCompletion(session)) {
+      // The previous completer stopped heartbeating: recover it now rather than
+      // making the client wait for the periodic cleanup.
+      const outcome = await recoverStaleCompletion(session);
+      if (outcome === "EXPIRED") {
+        await storage.deleteUploadSessionChunks(session.id).catch(() => {});
+        return reply.code(410).send({ message: "Upload session has expired" });
+      }
+      session = await loadOwnedSession(request.user.id, session.id, true);
+    }
     if (await expireIfNeeded(session, storage)) {
       return reply.code(410).send({ message: "Upload session has expired" });
     }
@@ -373,16 +396,9 @@ async function uploadRoutes(app) {
       return reply.code(409).send({ message: error.message, missingParts: error.missing || [] });
     }
 
-    const claimed = await prisma.uploadSession.updateMany({
-      where: {
-        id: session.id,
-        userId: request.user.id,
-        status: "UPLOADING",
-        expiresAt: { gt: new Date() }
-      },
-      data: { status: "COMPLETING" }
-    });
-    if (claimed.count !== 1) {
+    const leaseMs = (config.uploadCompletionLeaseSeconds || 120) * 1000;
+    const token = await claimCompletion(session, leaseMs);
+    if (!token) {
       session = await loadOwnedSession(request.user.id, session.id);
       if (session?.status === "COMPLETED") {
         const response = await completedResponse(request.user.id, session);
@@ -391,15 +407,17 @@ async function uploadRoutes(app) {
       return reply.code(409).send({ message: "Upload completion is already in progress" });
     }
 
+    // From here this request owns `token`. Every state change below is fenced on it,
+    // so a stalled or recovered ("zombie") completer can never publish a file.
+    const heartbeat = startLeaseHeartbeat(session.id, token, leaseMs);
+    const giveBack = () => relinquishCompletion(session.id, token).catch(() => false);
     const storedName = crypto.randomUUID();
     let assembled;
     try {
       assembled = await storage.assembleUploadParts(session.id, session.parts, storedName);
     } catch (error) {
-      await prisma.uploadSession.updateMany({
-        where: { id: session.id, userId: request.user.id, status: "COMPLETING" },
-        data: { status: "UPLOADING" }
-      });
+      heartbeat.stop();
+      await giveBack();
       if (error.code === "ENOENT" && Number.isInteger(error.uploadPartNumber)) {
         await prisma.uploadPart.deleteMany({
           where: {
@@ -416,25 +434,29 @@ async function uploadRoutes(app) {
     }
 
     if (assembled.size !== BigInt(session.expectedSize)) {
+      heartbeat.stop();
       await storage.delete(storedName).catch(() => false);
-      await prisma.uploadSession.updateMany({
-        where: { id: session.id, userId: request.user.id, status: "COMPLETING" },
-        data: { status: "UPLOADING" }
-      });
+      await giveBack();
       return reply.code(422).send({ message: "Assembled upload size mismatch" });
     }
     if (session.expectedChecksum && assembled.checksum !== session.expectedChecksum) {
+      heartbeat.stop();
       await storage.delete(storedName).catch(() => false);
-      await prisma.uploadSession.updateMany({
-        where: { id: session.id, userId: request.user.id, status: "COMPLETING" },
-        data: { status: "UPLOADING" }
-      });
+      await giveBack();
       return reply.code(422).send({ message: "Final upload checksum mismatch" });
     }
 
     let committed;
     try {
-      committed = await prisma.$transaction(async (tx) => {
+      committed = await retryOnConflict(() => prisma.$transaction(async (tx) => {
+        // Lock order: User first, UploadSession second (see lib/upload-session.js).
+        await lockUserForUpdate(tx, request.user.id);
+        const owned = await tx.uploadSession.findFirst({
+          where: { id: session.id, userId: request.user.id, status: "COMPLETING", completionToken: token },
+          select: { id: true }
+        });
+        if (!owned) throw leaseLostError();
+
         const quota = await commitUploadReservation(request.user.id, session.expectedSize, tx);
         if (!quota) {
           const error = new Error("Reserved upload quota is no longer valid");
@@ -458,25 +480,31 @@ async function uploadRoutes(app) {
             id: session.id,
             userId: request.user.id,
             status: "COMPLETING",
+            completionToken: token,
             fileId: null
           },
           data: {
             status: "COMPLETED",
             fileId: file.id,
-            completedAt: new Date()
+            completedAt: new Date(),
+            completionToken: null,
+            completionLeaseUntil: null
           }
         });
-        if (completed.count !== 1) throw new Error("Upload completion state changed concurrently");
+        if (completed.count !== 1) throw leaseLostError();
         return { file, quota };
-      });
+      }));
     } catch (error) {
+      heartbeat.stop();
       await storage.delete(storedName).catch(() => false);
-      await prisma.uploadSession.updateMany({
-        where: { id: session.id, userId: request.user.id, status: "COMPLETING" },
-        data: { status: "UPLOADING" }
-      });
+      if (error.code === "UPLOAD_COMPLETION_LEASE_LOST") {
+        // Someone else now owns (or has finished) this session; touch nothing of theirs.
+        return reply.code(409).send({ message: "Upload completion lease was lost; retry completion" });
+      }
+      await giveBack();
       throw error;
     }
+    heartbeat.stop();
 
     await storage.deleteUploadSessionChunks(session.id).catch((error) => {
       request.log.warn({ err: error, sessionId: session.id }, "Upload committed but chunk cleanup failed");

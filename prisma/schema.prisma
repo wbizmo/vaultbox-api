@@ -128,26 +128,32 @@ model DownloadToken {
 }
 
 model UploadSession {
-  id               String              @id @default(cuid())
-  userId           String
-  originalName     String
-  mimeType         String
-  expectedSize     BigInt
-  expectedChecksum String?
-  chunkSize        Int
-  partCount        Int
-  status           UploadSessionStatus @default(UPLOADING)
-  expiresAt        DateTime
-  fileId           String?             @unique
-  completedAt      DateTime?
-  createdAt        DateTime            @default(now())
-  updatedAt        DateTime            @updatedAt
+  id                   String              @id @default(cuid())
+  userId               String
+  originalName         String
+  mimeType             String
+  expectedSize         BigInt
+  expectedChecksum     String?
+  chunkSize            Int
+  partCount            Int
+  status               UploadSessionStatus @default(UPLOADING)
+  expiresAt            DateTime
+  fileId               String?             @unique
+  completedAt          DateTime?
+  // Completion lease / fencing: set when a completer claims the session, renewed by a
+  // heartbeat while it assembles, and required by the final commit. See docs/UPLOADS.md.
+  completionToken      String?
+  completionLeaseUntil DateTime?
+  completionGeneration Int                 @default(0)
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
 
   user  User         @relation(fields: [userId], references: [id])
   parts UploadPart[]
 
   @@index([userId, status, expiresAt])
   @@index([status, expiresAt])
+  @@index([status, completionLeaseUntil])
   @@index([userId, createdAt])
 }
 
