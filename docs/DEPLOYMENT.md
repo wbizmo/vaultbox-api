@@ -84,10 +84,10 @@ Before this release any user could self-select the seeded Basic/Pro plans. The s
 The production database must include migrations through:
 
 ```text
-20260909051000_resumable_upload_sessions
+20261104210000_plan_entitlements
 ```
 
-That migration introduces durable upload session state and the user's `reservedUploadBytes` counter.
+`20260909051000_resumable_upload_sessions` introduced durable upload session state and the user's `reservedUploadBytes` counter. `20261104210000_plan_entitlements` adds the additive `PlanEntitlement` and `BillingEvent` tables (no existing table or row is modified).
 
 Earlier v2 migrations also add access-path, cursor-pagination, substring-search and file-sort indexes used by the optimized query paths.
 
@@ -112,3 +112,5 @@ A future object-storage adapter can replace this provider behind the existing st
 ## Rollback
 
 v2.1.1 contains no schema change, so a rollback needs no database action. Do **not** roll back to a build that runs Node.js `24.19.0` (it lacks the October 2026 security fixes). Roll back to a patched build instead: redeploy the previous commit with the `.node-version` pin kept at `24.22.2` or later.
+
+Builds that predate the plan-entitlement release do not check entitlements: rolling back to one re-enables unrestricted paid-plan self-selection. Roll back only to a build that includes entitlement checks, or keep the current release running and fix forward. The new tables are additive and safe to leave in place on rollback.
