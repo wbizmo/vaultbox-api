@@ -45,6 +45,7 @@ Upload/download controls can be tuned with:
 - `MAX_UPLOAD_BYTES`
 - `UPLOAD_CHUNK_BYTES`
 - `UPLOAD_SESSION_EXPIRES_MINUTES`
+- `UPLOAD_COMPLETION_LEASE_SECONDS` (default 120; lease renewed by heartbeat during completion)
 - `UPLOAD_MAX_PARTS`
 - `UPLOAD_SUGGESTED_PARALLEL_PARTS`
 - `DOWNLOAD_TOKEN_EXPIRES_MINUTES`
@@ -84,8 +85,10 @@ Before this release any user could self-select the seeded Basic/Pro plans. The s
 The production database must include migrations through:
 
 ```text
-20261104210000_plan_entitlements
+20261104220000_upload_completion_lease
 ```
+
+(`20261104210000_plan_entitlements` and earlier migrations precede it.) The completion-lease migration only adds three nullable/defaulted columns and one index to `UploadSession`; running instances of the previous build ignore them, so it is safe to apply before the new code starts.
 
 `20260909051000_resumable_upload_sessions` introduced durable upload session state and the user's `reservedUploadBytes` counter. `20261104210000_plan_entitlements` adds the additive `PlanEntitlement` and `BillingEvent` tables (no existing table or row is modified).
 

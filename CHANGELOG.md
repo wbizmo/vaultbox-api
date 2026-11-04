@@ -4,6 +4,10 @@ All notable changes to VaultBox API are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Upload completion vs expiry (#40).** Completion now holds a renewable, fenced lease (`completionToken`, `completionLeaseUntil`, `completionGeneration`); the final commit requires the token, so expiry/recovery can no longer invalidate a live completion and a recovered "zombie" completer can no longer publish a file or double-charge quota. A healthy long assembly is never reclaimed; a crashed completer is recovered only after its lease lapses (to `UPLOADING`, or `EXPIRED` with the reservation released once). Lock order is now `User` then `UploadSession` everywhere (previously abort/expiry locked them in the opposite order to the completion commit, a deadlock risk); deadlock/serialization victims are retried with bounded jittered backoff. Migration `20261104220000_upload_completion_lease` adds three columns and an index.
+
 ### Security
 
 - **Plan entitlements (#39).** Selecting a paid plan now requires a server-side `PlanEntitlement` granted by an HMAC-signed, idempotent `POST /billing/webhook` event; entitlement check, quota fit and plan switch are one SQL statement under a per-user row lock, so revocation cannot be raced. **Behavior change:** previously any authenticated user could self-select any plan. Set `PLAN_SWITCH_MODE=demo` to keep that behavior explicitly. Adds migration `20261104210000_plan_entitlements` (two new tables; no existing data touched).

@@ -44,6 +44,10 @@ function getConfig() {
       min: 5,
       max: 1440
     }),
+    uploadCompletionLeaseSeconds: parseInteger(process.env.UPLOAD_COMPLETION_LEASE_SECONDS, 120, {
+      min: 2,
+      max: 3600
+    }),
     uploadMaxParts: parseInteger(process.env.UPLOAD_MAX_PARTS, 10000, { min: 1, max: 10000 }),
     uploadSuggestedParallelParts: parseInteger(process.env.UPLOAD_SUGGESTED_PARALLEL_PARTS, 4, {
       min: 1,

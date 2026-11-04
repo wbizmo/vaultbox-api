@@ -107,6 +107,30 @@ Concurrent completion requests cannot create two files or charge quota twice. A 
 
 Expired/stale sessions are reconciled by cleanup so process interruption does not permanently leak reserved capacity.
 
+### Session state machine and completion lease
+
+```text
+UPLOADING --claim--> COMPLETING --commit--> COMPLETED
+    |  ^                 |
+    |  +--relinquish/----+   (completer failed, or its lease lapsed and was recovered)
+    |     recover
+    +--abort--> ABORTED          UPLOADING --expiry--> EXPIRED
+                                 COMPLETING --lease lapsed AND session expired--> EXPIRED
+```
+
+Every transition is a database-conditional update (compare-and-set on `status`), so exactly one actor wins each one.
+
+**Completion lease and fencing.** Claiming `COMPLETING` stores a random `completionToken`, a `completionLeaseUntil` (default 120 s, `UPLOAD_COMPLETION_LEASE_SECONDS`) and increments `completionGeneration`. While assembling, the completer renews the lease every third of its duration. The final commit — quota conversion, `File` creation and the `COMPLETED` transition — is one transaction that requires the session to still be `COMPLETING` **with this request's token**. A completer that stalled and was recovered ("zombie") therefore cannot publish a file or charge quota, even if a newer completer is mid-assembly; its assembled bytes are deleted and it receives `409`. Assembly that merely takes longer than any fixed timeout is never reclaimed while heartbeats continue.
+
+**Recovery.** Only sessions whose lease has *lapsed* are recovered (by the 5-minute cleanup sweep, or inline when the client retries `complete`). The token is cleared; a session still within its expiry returns to `UPLOADING` (its parts and reservation are kept so the client can retry), otherwise it becomes `EXPIRED` and its reservation is released exactly once.
+
+**Lock acquisition order.** Every transaction that touches both tables locks rows in this order, which makes a lock cycle impossible:
+
+1. the `User` row (`SELECT ... FOR UPDATE`), then
+2. the `UploadSession` row.
+
+This applies to the completion commit, abort, expiry and stale-completion recovery. Units of work that can still be chosen as a deadlock or serialization victim are retried a bounded number of times (4 attempts) with jittered exponential backoff; they are idempotent by construction.
+
 ## Ownership and abuse boundaries
 
 - Authentication is required for every upload operation.
