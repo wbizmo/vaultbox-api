@@ -6,6 +6,8 @@ All notable changes to VaultBox API are documented here.
 
 ### Fixed
 
+- **In-flight part uploads vs completion/abort/expiry (#41).** A part can only become visible through a short transaction that locks the session row `FOR SHARE` and re-checks it is still `UPLOADING` and unexpired, so claiming completion, aborting and expiring (which update that row) cannot interleave with a late insert: the part either commits first and is in the frozen set, or is rejected (`409`/`410`) and its bytes removed. Completion re-reads the part set after its claim; its missing-object repair deletes only the exact row/object pair; a writer whose chunk directory vanished mid-stream gets `409` instead of `500`. No schema change.
+
 - **Upload completion vs expiry (#40).** Completion now holds a renewable, fenced lease (`completionToken`, `completionLeaseUntil`, `completionGeneration`); the final commit requires the token, so expiry/recovery can no longer invalidate a live completion and a recovered "zombie" completer can no longer publish a file or double-charge quota. A healthy long assembly is never reclaimed; a crashed completer is recovered only after its lease lapses (to `UPLOADING`, or `EXPIRED` with the reservation released once). Lock order is now `User` then `UploadSession` everywhere (previously abort/expiry locked them in the opposite order to the completion commit, a deadlock risk); deadlock/serialization victims are retried with bounded jittered backoff. Migration `20261104220000_upload_completion_lease` adds three columns and an index.
 
 ### Security
