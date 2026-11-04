@@ -45,6 +45,7 @@ Upload/download controls can be tuned with:
 - `MAX_UPLOAD_BYTES`
 - `UPLOAD_CHUNK_BYTES`
 - `UPLOAD_SESSION_EXPIRES_MINUTES`
+- `UPLOAD_RESERVATION_LEASE_SECONDS` (default 120; lease for one-shot upload reservations, renewed while the upload is alive)
 - `UPLOAD_COMPLETION_LEASE_SECONDS` (default 120; lease renewed by heartbeat during completion)
 - `UPLOAD_MAX_PARTS`
 - `UPLOAD_SUGGESTED_PARALLEL_PARTS`
@@ -85,8 +86,25 @@ Before this release any user could self-select the seeded Basic/Pro plans. The s
 The production database must include migrations through:
 
 ```text
-20261104220000_upload_completion_lease
+20261104230000_upload_reservations
 ```
+
+(`20261104220000_upload_completion_lease` and earlier migrations precede it.) `20261104230000_upload_reservations` adds the additive `UploadReservation` table and enum only.
+
+**Checking for quota leaked before this release.** Reservations made by previous builds have no durable owner. After the rollout, no user should hold reserved bytes with nothing live to back them. This read-only query lists candidates (it changes nothing; investigate before correcting any value):
+
+```sql
+SELECT u."id", u."reservedUploadBytes",
+       COALESCE(s.sessions, 0) AS "uploadSessionBytes", COALESCE(r.pending, 0) AS "pendingReservationBytes"
+FROM "User" u
+LEFT JOIN (SELECT "userId", SUM("expectedSize") AS sessions FROM "UploadSession"
+           WHERE "status" IN ('UPLOADING','COMPLETING') GROUP BY "userId") s ON s."userId" = u."id"
+LEFT JOIN (SELECT "userId", SUM("bytes") AS pending FROM "UploadReservation"
+           WHERE "state" = 'PENDING' GROUP BY "userId") r ON r."userId" = u."id"
+WHERE u."reservedUploadBytes" <> COALESCE(s.sessions, 0) + COALESCE(r.pending, 0);
+```
+
+Run it when no uploads are in flight (it will legitimately show rows while old-build instances still hold in-memory reservations).
 
 (`20261104210000_plan_entitlements` and earlier migrations precede it.) The completion-lease migration only adds three nullable/defaulted columns and one index to `UploadSession`; running instances of the previous build ignore them, so it is safe to apply before the new code starts.
 

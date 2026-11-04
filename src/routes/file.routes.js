@@ -7,11 +7,17 @@ const { formatBytes } = require("../lib/bytes");
 const { HashingTransform } = require("../lib/hash-stream");
 const { softDeleteFileWithQuota } = require("../lib/file-delete");
 const {
-  reserveUploadQuota,
-  reservePendingUploadQuota,
-  releaseUploadReservation,
-  commitUploadReservation
+  reserveUploadQuota
 } = require("../lib/quota");
+const {
+  createReservation,
+  startReservationHeartbeat,
+  commitReservation,
+  linkReservationFile,
+  releaseReservation
+} = require("../lib/upload-reservation");
+const { lockUserForUpdate } = require("../lib/upload-session");
+const { retryOnConflict } = require("../lib/db-retry");
 const { decodeCursor, cursorWhere, cursorOrderBy, finishCursorPage } = require("../lib/pagination");
 
 const fileCursorTypes = {
@@ -82,15 +88,22 @@ async function fileRoutes(app) {
       });
     }
 
-    let reservationHeld = false;
+    // With x-upload-size the pending quota is owned by a durable UploadReservation row (created in
+    // the same transaction as the quota increment), so a crash cannot strand it: the sweeper
+    // releases it once its lease lapses. Without the header nothing is held across the stream.
+    const leaseMs = (app.vaultboxConfig.uploadReservationLeaseSeconds || 120) * 1000;
+    let reservationId = null;
+    let heartbeat = null;
     const releaseEarlyReservation = async () => {
-      if (!reservationHeld) return;
-      reservationHeld = false;
-      await releaseUploadReservation(user.id, expectedSize).catch(() => null);
+      heartbeat?.stop();
+      if (!reservationId) return;
+      const id = reservationId;
+      reservationId = null;
+      await releaseReservation(id).catch(() => null);
     };
 
     if (expectedSize !== null) {
-      const reserved = await reservePendingUploadQuota(user.id, expectedSize);
+      const reserved = await createReservation(user.id, expectedSize, leaseMs);
       if (!reserved) {
         return reply.code(413).send({
           message: "Storage quota exceeded",
@@ -98,7 +111,8 @@ async function fileRoutes(app) {
           storageLimit: user.plan.storageLimit.toString()
         });
       }
-      reservationHeld = true;
+      reservationId = reserved.id;
+      heartbeat = startReservationHeartbeat(reservationId, leaseMs);
     }
 
     let data;
@@ -150,10 +164,12 @@ async function fileRoutes(app) {
     let admittedQuota;
 
     try {
-      const committed = await prisma.$transaction(async (tx) => {
+      const committed = await retryOnConflict(() => prisma.$transaction(async (tx) => {
+        // Lock order: User first (see lib/upload-session.js).
+        await lockUserForUpdate(tx, user.id);
         const reservation = expectedSize === null
           ? await reserveUploadQuota(user.id, fileSize, tx)
-          : await commitUploadReservation(user.id, fileSize, tx);
+          : await commitReservation(tx, reservationId, user.id, fileSize);
 
         if (!reservation) {
           const quotaError = new Error(
@@ -176,13 +192,15 @@ async function fileRoutes(app) {
             userId: user.id
           }
         });
+        if (expectedSize !== null) await linkReservationFile(tx, reservationId, created.id);
 
         return { file: created, reservation };
-      });
+      }));
 
       file = committed.file;
       admittedQuota = committed.reservation;
-      reservationHeld = false;
+      heartbeat?.stop();
+      reservationId = null; // converted atomically with the file; nothing left to release
     } catch (error) {
       await storage.delete(storedName).catch(() => false);
       await releaseEarlyReservation();

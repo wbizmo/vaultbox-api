@@ -28,6 +28,12 @@ enum EntitlementStatus {
   REVOKED
 }
 
+enum ReservationState {
+  PENDING
+  COMMITTED
+  RELEASED
+}
+
 enum UploadSessionStatus {
   UPLOADING
   COMPLETING
@@ -49,13 +55,14 @@ model User {
   createdAt           DateTime   @default(now())
   updatedAt           DateTime   @updatedAt
 
-  plan           Plan?             @relation(fields: [planId], references: [id])
+  plan           Plan?               @relation(fields: [planId], references: [id])
   files          File[]
   folders        Folder[]
   tokens         DownloadToken[]
   auditLogs      AuditLog[]
   uploadSessions UploadSession[]
   entitlements   PlanEntitlement[]
+  reservations   UploadReservation[]
 
   @@index([status, createdAt, id])
   @@index([createdAt, id])
@@ -215,4 +222,23 @@ model BillingEvent {
   type        String
   payloadHash String
   createdAt   DateTime @default(now())
+}
+
+// Durable owner of one one-shot upload's pending quota (x-upload-size path). Created in the same
+// transaction as the quota increment; committed or released exactly once by compare-and-set;
+// released by the sweeper when the lease lapses (crashed or stalled worker).
+model UploadReservation {
+  id         String           @id @default(cuid())
+  userId     String
+  bytes      BigInt
+  state      ReservationState @default(PENDING)
+  leaseUntil DateTime
+  fileId     String?
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([state, leaseUntil])
+  @@index([userId, state])
 }

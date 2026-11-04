@@ -39,6 +39,16 @@ The declaration never replaces server measurement. The streamed byte count remai
 
 Clients that omit `x-upload-size` keep the compatibility behavior: VaultBox streams the file first, measures it, then performs the authoritative atomic final quota check.
 
+### Durable reservations and crash recovery
+
+With `x-upload-size`, the pending quota is owned by a durable `UploadReservation` row (`PENDING` → `COMMITTED` | `RELEASED`) created **in the same transaction** as the quota increment, so a crash can never leave one without the other. While the body streams, a heartbeat renews the row's lease every third of `UPLOAD_RESERVATION_LEASE_SECONDS` (default 120). The measured upload is committed in one transaction that moves the row `PENDING → COMMITTED` by compare-and-set, converts the reserved bytes into `storageUsed`, and creates the `File`.
+
+Commit and release are each a compare-and-set on the row, and quota is only adjusted by the actor whose transition applied: duplicate or concurrent attempts cannot double-adjust counters, and a worker that stalled long enough to be swept gets a `409` at commit instead of consuming someone else's reserved bytes. If a worker is killed (SIGKILL, OOM, redeploy) at any point, its reservation stays held until the lease lapses; the shared sweeper (the same 5-minute job that expires upload sessions) then releases it exactly once, on any instance. Bytes already written to storage for a crashed upload are orphans; reconciling them is tracked in #55.
+
+Clients without `x-upload-size` are unchanged: nothing is held across the stream, so there is nothing to leak.
+
+**Rolling deploys.** Instances running the previous build still reserve in process memory with no durable row; if one of those is killed, its reservation cannot be recovered by this sweeper. Finish the rollout promptly, and see `docs/DEPLOYMENT.md` for how to check for pre-existing leaked reservations.
+
 ## Resumable upload
 
 For large or interruption-prone transfers use:
