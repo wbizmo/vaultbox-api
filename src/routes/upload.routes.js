@@ -14,6 +14,7 @@ const {
   missingPartNumbers,
   assertCompleteParts,
   lockUserForUpdate,
+  insertPartIfOpen,
   releaseSession,
   claimCompletion,
   relinquishCompletion,
@@ -36,6 +37,13 @@ const partThrottle = throttlePreHandler(
   { limit: 240, windowSeconds: 60 },
   (request) => request.user?.id || request.ip
 );
+
+function closedSessionReply(reply, status) {
+  if (status === "EXPIRED") return reply.code(410).send({ message: "Upload session has expired" });
+  return reply.code(409).send({
+    message: `Upload session is ${String(status || "closed").toLowerCase()} and no longer accepts parts`
+  });
+}
 
 function leaseLostError() {
   const error = new Error("Upload completion lease was lost");
@@ -273,9 +281,18 @@ async function uploadRoutes(app) {
       }
     });
     if (existing && !(await storage.existsUploadPart(session.id, existing.storedName))) {
-      await prisma.uploadPart.deleteMany({
-        where: { id: existing.id, session: { userId: request.user.id } }
+      // Repair only while the session is open for writes and only this exact row/object pair;
+      // a COMPLETING session's part set is frozen.
+      const repaired = await prisma.uploadPart.deleteMany({
+        where: {
+          id: existing.id,
+          storedName: existing.storedName,
+          session: { userId: request.user.id, status: "UPLOADING" }
+        }
       });
+      if (repaired.count !== 1) {
+        return reply.code(409).send({ message: "Upload session is no longer accepting parts" });
+      }
       existing = null;
     }
     if (existing) {
@@ -305,6 +322,12 @@ async function uploadRoutes(app) {
       await pipeline(data.file, hasher, storage.createUploadPartWriteStream(session.id, storedName));
     } catch (error) {
       await storage.deleteUploadPart(session.id, storedName).catch(() => false);
+      if (error.code === "ENOENT") {
+        // The session's chunk directory vanished: it was aborted, expired or completed while
+        // this body was streaming. That is a conflict, not a server error.
+        const latest = await loadOwnedSession(request.user.id, session.id);
+        if (!latest || latest.status !== "UPLOADING") return closedSessionReply(reply, latest?.status);
+      }
       throw error;
     }
 
@@ -323,16 +346,19 @@ async function uploadRoutes(app) {
 
     let part;
     try {
-      part = await prisma.uploadPart.create({
-        data: {
-          sessionId: session.id,
-          partNumber,
-          offset: expected.start,
-          size: measuredSize,
-          checksum,
-          storedName
-        }
+      const inserted = await insertPartIfOpen(session, {
+        partNumber,
+        offset: expected.start,
+        size: measuredSize,
+        checksum,
+        storedName
       });
+      if (inserted.closed) {
+        // Admitted while UPLOADING but the session closed before the part could commit.
+        await storage.deleteUploadPart(session.id, storedName).catch(() => false);
+        return closedSessionReply(reply, inserted.closed);
+      }
+      part = inserted.part;
     } catch (error) {
       await storage.deleteUploadPart(session.id, storedName).catch(() => false);
       if (error.code !== "P2002") throw error;
@@ -407,6 +433,20 @@ async function uploadRoutes(app) {
       return reply.code(409).send({ message: "Upload completion is already in progress" });
     }
 
+    // Claiming locked the session row exclusively, so no part can commit from here on: this
+    // read is the frozen part set that gets assembled (the pre-claim read may be stale).
+    const frozenParts = await prisma.uploadPart.findMany({
+      where: { sessionId: session.id },
+      orderBy: { partNumber: "asc" }
+    });
+    session = { ...session, parts: frozenParts };
+    try {
+      assertCompleteParts(session, frozenParts);
+    } catch (error) {
+      await relinquishCompletion(session.id, token).catch(() => false);
+      return reply.code(409).send({ message: error.message, missingParts: error.missing || [] });
+    }
+
     // From here this request owns `token`. Every state change below is fenced on it,
     // so a stalled or recovered ("zombie") completer can never publish a file.
     const heartbeat = startLeaseHeartbeat(session.id, token, leaseMs);
@@ -419,10 +459,13 @@ async function uploadRoutes(app) {
       heartbeat.stop();
       await giveBack();
       if (error.code === "ENOENT" && Number.isInteger(error.uploadPartNumber)) {
+        // Delete only the exact row whose object is missing (a concurrent re-upload creates a
+        // different storedName and must not be removed).
         await prisma.uploadPart.deleteMany({
           where: {
             sessionId: session.id,
             partNumber: error.uploadPartNumber,
+            ...(error.uploadPartStoredName ? { storedName: error.uploadPartStoredName } : {}),
             session: { userId: request.user.id }
           }
         });

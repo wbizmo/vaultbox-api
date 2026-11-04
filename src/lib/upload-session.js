@@ -127,6 +127,36 @@ async function releaseSession(session, targetStatus, client = prisma) {
 }
 
 /**
+ * Insert an uploaded part only while the session is still open for writes.
+ *
+ * The session row is locked FOR SHARE for the (short) duration of the insert transaction;
+ * the bytes were streamed before it began, so no lock is held across the network body.
+ * Claiming completion, aborting and expiring all UPDATE the session row, which conflicts with
+ * FOR SHARE: they wait for in-flight inserts to commit, and any insert that begins after they
+ * commit observes the closed status and is rejected. A part therefore either commits before the
+ * session closes (and is in the frozen set completion reads) or is rejected -- never visible late.
+ * Only the session row is locked (no User row), so the User -> UploadSession order is respected.
+ *
+ * Returns { part } on success or { closed: <reason> } when the session no longer accepts parts.
+ */
+async function insertPartIfOpen(session, data, client = prisma) {
+  return client.$transaction(async (tx) => {
+    const rows = await tx.$queryRaw`
+      SELECT "status"::text AS "status", "expiresAt" AS "expiresAt"
+      FROM "UploadSession"
+      WHERE "id" = ${session.id} AND "userId" = ${session.userId}
+      FOR SHARE
+    `;
+    const current = rows[0];
+    if (!current) return { closed: "MISSING" };
+    if (current.status !== "UPLOADING") return { closed: current.status };
+    if (new Date(current.expiresAt) <= new Date()) return { closed: "EXPIRED" };
+    const part = await tx.uploadPart.create({ data: { ...data, sessionId: session.id } });
+    return { part };
+  });
+}
+
+/**
  * Claim the exclusive right to complete a session. Returns the fencing token, or
  * null when another completer holds it, the session left UPLOADING, or it expired.
  */
@@ -297,6 +327,7 @@ module.exports = {
   assertCompleteParts,
   lockUserForUpdate,
   releaseSession,
+  insertPartIfOpen,
   claimCompletion,
   renewCompletionLease,
   relinquishCompletion,

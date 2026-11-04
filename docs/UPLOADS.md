@@ -131,6 +131,14 @@ Every transition is a database-conditional update (compare-and-set on `status`),
 
 This applies to the completion commit, abort, expiry and stale-completion recovery. Units of work that can still be chosen as a deadlock or serialization victim are retried a bounded number of times (4 attempts) with jittered exponential backoff; they are idempotent by construction.
 
+### Part admission fence
+
+A part body is streamed to storage *before* any database lock is taken, so no transaction is held across a network stream. The part only becomes visible in a short transaction that locks the session row `FOR SHARE`, re-checks that the session is still `UPLOADING` and unexpired, and inserts the `UploadPart` row.
+
+Claiming completion, aborting and expiring all `UPDATE` the session row, which conflicts with `FOR SHARE`. So a part either commits before the session closes — and is then part of the frozen set completion reads *after* its claim — or it is rejected: `409` if the session was aborted/completing/completed, `410` if it expired. A rejected part's stored bytes are deleted immediately; any that remain (for example after a crash) are removed with the session's chunk directory by the terminal-session sweep. A writer whose chunk directory disappears mid-stream because the session closed also receives `409` rather than a server error.
+
+Completion re-reads the part set after claiming the session and asserts it complete before assembling, and its missing-object repair deletes only the exact row/object pair that was found missing, so a part concurrently re-uploaded is never removed.
+
 ## Ownership and abuse boundaries
 
 - Authentication is required for every upload operation.
