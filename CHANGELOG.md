@@ -2,6 +2,12 @@
 
 All notable changes to VaultBox API are documented here.
 
+## [Unreleased]
+
+### Added
+
+- Two-tenant BOLA/IDOR regression matrix (`test/authorization-matrix.integration.test.js`, #50): cross-tenant access to files, folders, upload sessions/parts and download tokens must be indistinguishable from unknown IDs and leave DB state and stored bytes unchanged; admin routes reject ordinary accounts and forged role/signature/`alg:none` tokens; suspended/deleted accounts are blocked; concurrent owner/foreign deletion charges quota once; and every OpenAPI route outside an explicit public allowlist must reject anonymous callers.
+
 ## [2.1.1] - 2026-11-04
 
 ### Security
