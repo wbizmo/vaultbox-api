@@ -23,6 +23,11 @@ enum FileStatus {
   DELETED
 }
 
+enum EntitlementStatus {
+  ACTIVE
+  REVOKED
+}
+
 enum UploadSessionStatus {
   UPLOADING
   COMPLETING
@@ -44,12 +49,13 @@ model User {
   createdAt           DateTime   @default(now())
   updatedAt           DateTime   @updatedAt
 
-  plan           Plan?           @relation(fields: [planId], references: [id])
+  plan           Plan?             @relation(fields: [planId], references: [id])
   files          File[]
   folders        Folder[]
   tokens         DownloadToken[]
   auditLogs      AuditLog[]
   uploadSessions UploadSession[]
+  entitlements   PlanEntitlement[]
 
   @@index([status, createdAt, id])
   @@index([createdAt, id])
@@ -63,7 +69,8 @@ model Plan {
   storageLimit BigInt
   createdAt    DateTime @default(now())
 
-  users User[]
+  users        User[]
+  entitlements PlanEntitlement[]
 }
 
 model Folder {
@@ -173,4 +180,33 @@ model AuditLog {
   @@index([createdAt, id])
   @@index([action, createdAt, id])
   @@index([userId, createdAt, id])
+}
+
+// Server-owned proof that a user may select a paid plan. Created and revoked
+// only by authenticated, idempotent billing events (see BillingEvent).
+model PlanEntitlement {
+  id         String            @id @default(cuid())
+  userId     String
+  planId     String
+  status     EntitlementStatus @default(ACTIVE)
+  eventId    String            @unique
+  validFrom  DateTime          @default(now())
+  validUntil DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+  plan Plan @relation(fields: [planId], references: [id])
+
+  @@index([userId, planId, status])
+}
+
+// One row per processed provider event: the primary key makes webhook
+// processing idempotent and replay-safe across instances.
+model BillingEvent {
+  id          String   @id
+  type        String
+  payloadHash String
+  createdAt   DateTime @default(now())
 }

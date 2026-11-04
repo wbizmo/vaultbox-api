@@ -38,6 +38,7 @@ const PUBLIC_ROUTES = new Set([
   "GET /plans",
   "POST /auth/register",
   "POST /auth/login",
+  "POST /billing/webhook", // authenticated by HMAC signature, not a bearer token
   "GET /download/{token}",
   "HEAD /download/{token}"
 ]);
@@ -251,7 +252,7 @@ test("listings, quota and plan changes are isolated per tenant", async (t) => {
 
   // Subscribing as Bob changes only Bob.
   const otherPlan = await prisma.plan.create({
-    data: { name: `authz-other-${crypto.randomUUID()}`, priceMonthly: 1, storageLimit: 5000n }
+    data: { name: `authz-other-${crypto.randomUUID()}`, priceMonthly: 0, storageLimit: 5000n }
   });
   const switched = await f.app.inject({
     method: "PATCH",

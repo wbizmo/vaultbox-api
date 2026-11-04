@@ -28,6 +28,14 @@ function getConfig() {
     appUrl: process.env.APP_URL || "http://localhost:4000",
     corsOrigins: parseList(process.env.CORS_ORIGINS),
     maxUploadBytes,
+    // "entitled" (default, secure): paid plans need a server-verified entitlement.
+    // "demo": any authenticated user may self-select any plan that fits (no billing).
+    planSwitchMode: process.env.PLAN_SWITCH_MODE === "demo" ? "demo" : "entitled",
+    billingWebhookSecret: process.env.BILLING_WEBHOOK_SECRET || "",
+    billingWebhookToleranceSeconds: parseInteger(process.env.BILLING_WEBHOOK_TOLERANCE_SECONDS, 300, {
+      min: 30,
+      max: 3600
+    }),
     uploadChunkBytes: parseInteger(process.env.UPLOAD_CHUNK_BYTES, 8 * 1024 * 1024, {
       min: 256 * 1024,
       max: Math.min(maxUploadBytes, 128 * 1024 * 1024)

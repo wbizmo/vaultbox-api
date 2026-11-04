@@ -4,7 +4,13 @@ All notable changes to VaultBox API are documented here.
 
 ## [Unreleased]
 
+### Security
+
+- **Plan entitlements (#39).** Selecting a paid plan now requires a server-side `PlanEntitlement` granted by an HMAC-signed, idempotent `POST /billing/webhook` event; entitlement check, quota fit and plan switch are one SQL statement under a per-user row lock, so revocation cannot be raced. **Behavior change:** previously any authenticated user could self-select any plan. Set `PLAN_SWITCH_MODE=demo` to keep that behavior explicitly. Adds migration `20261104210000_plan_entitlements` (two new tables; no existing data touched).
+
 ### Added
+
+- `PlanEntitlement` / `BillingEvent` tables, `BILLING_WEBHOOK_SECRET`, `BILLING_WEBHOOK_TOLERANCE_SECONDS`, `PLAN_SWITCH_MODE`.
 
 - Two-tenant BOLA/IDOR regression matrix (`test/authorization-matrix.integration.test.js`, #50): cross-tenant access to files, folders, upload sessions/parts and download tokens must be indistinguishable from unknown IDs and leave DB state and stored bytes unchanged; admin routes reject ordinary accounts and forged role/signature/`alg:none` tokens; suspended/deleted accounts are blocked; concurrent owner/foreign deletion charges quota once; and every OpenAPI route outside an explicit public allowlist must reject anonymous callers.
 
