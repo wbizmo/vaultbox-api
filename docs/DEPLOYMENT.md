@@ -34,6 +34,12 @@ At minimum production must provide:
 - `REDIS_URL`
 - `CORS_ORIGINS`
 
+Plan and billing behavior is controlled with (see [Plan entitlements](#plan-entitlements-and-billing-webhook)):
+
+- `PLAN_SWITCH_MODE` — `entitled` (default) or `demo`
+- `BILLING_WEBHOOK_SECRET` — shared HMAC secret; the webhook returns `503` while unset
+- `BILLING_WEBHOOK_TOLERANCE_SECONDS` — signature timestamp tolerance (default 300)
+
 Upload/download controls can be tuned with:
 
 - `MAX_UPLOAD_BYTES`
@@ -44,6 +50,22 @@ Upload/download controls can be tuned with:
 - `DOWNLOAD_TOKEN_EXPIRES_MINUTES`
 - `DOWNLOAD_MAX_RANGES`
 - `DOWNLOAD_SUGGESTED_PART_BYTES`
+
+## Plan entitlements and billing webhook
+
+`PATCH /plans/:planId/subscribe` no longer lets any authenticated user select a paid plan. A plan with `priceMonthly > 0` is activated only when the user holds an `ACTIVE`, in-period `PlanEntitlement` for that exact plan, checked in the same SQL statement that switches the plan and verifies `storageUsed + reservedUploadBytes` fits the new limit. Free plans remain self-service.
+
+Entitlements are created and revoked only by `POST /billing/webhook`:
+
+- Header `x-vaultbox-signature: t=<unix seconds>,v1=<hex HMAC-SHA256(BILLING_WEBHOOK_SECRET, "<t>.<raw request body>")>`; timestamps outside the tolerance window are rejected (replay protection) and the comparison is constant-time.
+- Body: `{ eventId, type: "entitlement.granted" | "entitlement.revoked", userId, planId, validUntil?, fallbackPlanId? }`.
+- Processing is idempotent by `eventId` (`BillingEvent` primary key): a replay returns `200 { replayed: true }`; the same `eventId` with a different payload returns `409`.
+- Grant, revoke and subscribe for one user lock that user's row first, so a revocation cannot be raced by a concurrent subscribe.
+- On revoke the user is downgraded to the plan named `Free` (or the free plan given as `fallbackPlanId`) **if current usage fits**. Otherwise the user keeps the plan and all data in a *grace state*: nothing is deleted or made unreadable, the entitlement is revoked so the plan cannot be re-selected, and the downgrade happens when usage drops below the free limit and the user switches themselves. Time-based expiry (`validUntil`) is enforced when a plan is selected; there is no background sweeper yet that downgrades users whose entitlement merely lapsed.
+
+### Demo mode — action required on existing deployments
+
+Before this release any user could self-select the seeded Basic/Pro plans. The secure behavior is now the default **in every environment**. To keep the old unrestricted behavior (for example on a public demo with no billing) set `PLAN_SWITCH_MODE=demo` explicitly. **If the live Render service relies on self-service paid plans, set this variable before or when deploying, or those requests will return `403`.** Demo mode must not be used when paid plans confer real value.
 
 ## Release deploy checklist
 
@@ -62,10 +84,10 @@ Upload/download controls can be tuned with:
 The production database must include migrations through:
 
 ```text
-20260909051000_resumable_upload_sessions
+20261104210000_plan_entitlements
 ```
 
-That migration introduces durable upload session state and the user's `reservedUploadBytes` counter.
+`20260909051000_resumable_upload_sessions` introduced durable upload session state and the user's `reservedUploadBytes` counter. `20261104210000_plan_entitlements` adds the additive `PlanEntitlement` and `BillingEvent` tables (no existing table or row is modified).
 
 Earlier v2 migrations also add access-path, cursor-pagination, substring-search and file-sort indexes used by the optimized query paths.
 
@@ -90,3 +112,5 @@ A future object-storage adapter can replace this provider behind the existing st
 ## Rollback
 
 v2.1.1 contains no schema change, so a rollback needs no database action. Do **not** roll back to a build that runs Node.js `24.19.0` (it lacks the October 2026 security fixes). Roll back to a patched build instead: redeploy the previous commit with the `.node-version` pin kept at `24.22.2` or later.
+
+Builds that predate the plan-entitlement release do not check entitlements: rolling back to one re-enables unrestricted paid-plan self-selection. Roll back only to a build that includes entitlement checks, or keep the current release running and fix forward. The new tables are additive and safe to leave in place on rollback.

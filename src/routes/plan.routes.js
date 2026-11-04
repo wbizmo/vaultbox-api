@@ -2,6 +2,7 @@ const prisma = require("../lib/prisma");
 const { requireAuth } = require("../middleware/auth");
 const { formatBytes } = require("../lib/bytes");
 const { switchPlanIfFits } = require("../lib/quota");
+const { switchPlanIfEntitled, hasActiveEntitlement } = require("../lib/entitlements");
 
 function serializePlan(plan) {
   return {
@@ -60,14 +61,22 @@ async function planRoutes(app) {
     schema: {
       tags: ["Plans"],
       summary: "Switch current user to another plan without violating quota",
+      description: "Free plans are self-service. Paid plans (priceMonthly > 0) require an active server-side entitlement created by an authenticated billing event, unless the deployment runs with PLAN_SWITCH_MODE=demo.",
       security: [{ bearerAuth: [] }]
     }
   }, async (request, reply) => {
     const plan = await prisma.plan.findUnique({ where: { id: request.params.planId } });
     if (!plan) return reply.code(404).send({ message: "Plan not found" });
 
-    const switched = await switchPlanIfFits(request.user.id, plan.id);
+    const demoMode = app.vaultboxConfig?.planSwitchMode === "demo";
+    const switched = demoMode
+      ? await switchPlanIfFits(request.user.id, plan.id)
+      : await switchPlanIfEntitled(request.user.id, plan.id);
     if (!switched) {
+      if (!demoMode && plan.priceMonthly > 0 && !(await hasActiveEntitlement(request.user.id, plan.id))) {
+        return reply.code(403).send({ message: "This plan requires an active entitlement" });
+      }
+
       const user = await prisma.user.findUnique({
         where: { id: request.user.id },
         select: { storageUsed: true }

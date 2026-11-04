@@ -170,7 +170,8 @@ The upload-session/part model maps naturally to future multipart object-storage 
 
 - `GET /plans`
 - `GET /quota`
-- `PATCH /plans/:planId/subscribe`
+- `PATCH /plans/:planId/subscribe` — free plans are self-service; **paid plans (`priceMonthly > 0`) require a server-side entitlement** (see [Plan entitlements](./docs/DEPLOYMENT.md#plan-entitlements-and-billing-webhook)). Without one the route returns `403`.
+- `POST /billing/webhook` — HMAC-signed, idempotent `entitlement.granted` / `entitlement.revoked` events (no bearer token).
 
 ### Files and uploads
 
