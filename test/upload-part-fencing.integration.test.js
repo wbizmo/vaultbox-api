@@ -147,7 +147,7 @@ async function fixture(t) {
   const abort = (id) => app.inject({ method: "DELETE", url: `/upload-sessions/${id}`, headers });
   const account = () => prisma.user.findUnique({ where: { id: user.id } });
   const partRows = (id) => prisma.uploadPart.findMany({ where: { sessionId: id }, orderBy: { partNumber: "asc" } });
-  const partFiles = async (id) => (await fs.readdir(storage.resolveUploadSession(id)).catch(() => []));
+  const partFiles = async (id) => (await fs.readdir(storage.resolveUploadSession(id)).catch(() => [])).sort();
 
   return { app, storage, root, user, headers, bytes, createSession, putPart, complete, abort, account, partRows, partFiles };
 }
