@@ -96,7 +96,7 @@ async function fixture(t) {
   const plan = await prisma.plan.create({
     data: { name: `authz-${crypto.randomUUID()}`, priceMonthly: 0, storageLimit: 10000n }
   });
-  const alice = await createUser(plan.id, { storageUsed: 11n });
+  const alice = await createUser(plan.id, { storageUsed: 100n });
   const bob = await createUser(plan.id);
   const admin = await createUser(plan.id, { role: "ADMIN" });
   const suspended = await createUser(plan.id, { status: "SUSPENDED" });
@@ -207,7 +207,7 @@ test("a second tenant cannot read, mutate, complete, abort or mint access to ano
   assert.equal(session.status, "UPLOADING");
   assert.equal(await prisma.uploadPart.count({ where: { sessionId: f.session.id } }), 0);
   const alice = await prisma.user.findUnique({ where: { id: f.alice.id } });
-  assert.equal(alice.storageUsed, 11n);
+  assert.equal(alice.storageUsed, 100n);
   assert.equal(alice.reservedUploadBytes, 8n);
   assert.equal(await prisma.downloadToken.count({ where: { fileId: f.file.id } }), 0);
   assert.equal(await prisma.auditLog.count({ where: { userId: f.bob.id } }), 0);
@@ -237,9 +237,12 @@ test("listings, quota and plan changes are isolated per tenant", async (t) => {
   const cursorFiles = await f.app.inject({ method: "GET", url: "/files?pagination=cursor", headers: bobHeaders });
   assert.ok(!cursorFiles.body.includes(f.file.id));
 
+  assert.equal(cursorFiles.statusCode, 200, cursorFiles.body);
   const folders = await f.app.inject({ method: "GET", url: "/folders", headers: bobHeaders });
+  assert.equal(folders.statusCode, 200, folders.body);
   assert.ok(!folders.body.includes(f.folder.id));
   const cursorFolders = await f.app.inject({ method: "GET", url: "/folders?pagination=cursor", headers: bobHeaders });
+  assert.equal(cursorFolders.statusCode, 200, cursorFolders.body);
   assert.ok(!cursorFolders.body.includes(f.folder.id));
 
   const bobQuota = await f.app.inject({ method: "GET", url: "/quota", headers: bobHeaders });
@@ -267,6 +270,7 @@ test("listings, quota and plan changes are isolated per tenant", async (t) => {
     url: `/quota?userId=${f.alice.id}`,
     headers: bobHeaders
   });
+  assert.equal(spoof.statusCode, 200, spoof.body);
   assert.equal(spoof.json().quota.storageUsed, "0");
 });
 
@@ -380,8 +384,21 @@ test("concurrent owner deletion and foreign deletion remove the file and charge 
   assert.equal(stranger.statusCode, 404);
 
   const alice = await prisma.user.findUnique({ where: { id: f.alice.id } });
-  assert.equal(alice.storageUsed, 0n, "quota must be decremented exactly once, by the owner's delete");
+  // 100 - 12 bytes: well above the clamp-at-zero floor, so a double decrement is visible.
+  assert.equal(alice.storageUsed, 88n, "quota must be decremented exactly once, by the owner's delete");
   const bob = await prisma.user.findUnique({ where: { id: f.bob.id } });
   assert.equal(bob.storageUsed, 0n);
   assert.equal((await prisma.file.findUnique({ where: { id: f.file.id } })).status, "DELETED");
+});
+
+test("duplicate concurrent deletes by the owner charge quota exactly once", async (t) => {
+  const f = await fixture(t);
+  const headers = f.auth(f.alice);
+  const results = await Promise.all(
+    Array.from({ length: 4 }, () => f.app.inject({ method: "DELETE", url: `/files/${f.file.id}`, headers }))
+  );
+  assert.equal(results.filter((r) => r.statusCode === 200).length, 1, results.map((r) => r.statusCode).join());
+  assert.equal(results.filter((r) => r.statusCode === 404).length, 3);
+  const alice = await prisma.user.findUnique({ where: { id: f.alice.id } });
+  assert.equal(alice.storageUsed, 88n, "100 - 12 bytes, decremented once despite four racing deletes");
 });
