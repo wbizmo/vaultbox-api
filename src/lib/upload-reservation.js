@@ -79,14 +79,23 @@ async function linkReservationFile(tx, id, fileId) {
   await tx.uploadReservation.update({ where: { id }, data: { fileId } });
 }
 
-/** Release exactly once; returns true only for the caller whose transition applied. */
-async function releaseReservation(id, client = prisma) {
+/**
+ * Release exactly once; returns true only for the caller whose transition applied.
+ * Route cleanup releases unconditionally. The sweeper passes `lapsedBefore` so the
+ * compare-and-set also requires the lease to still be lapsed: a heartbeat that renews
+ * between the sweeper's read and this write wins and the live upload is left alone.
+ */
+async function releaseReservation(id, client = prisma, { lapsedBefore = null } = {}) {
   return retryOnConflict(() => client.$transaction(async (tx) => {
     const row = await tx.uploadReservation.findUnique({ where: { id } });
     if (!row || row.state !== "PENDING") return false;
     await lockUserForUpdate(tx, row.userId);
     const released = await tx.uploadReservation.updateMany({
-      where: { id, state: "PENDING" },
+      where: {
+        id,
+        state: "PENDING",
+        ...(lapsedBefore ? { leaseUntil: { lt: lapsedBefore } } : {})
+      },
       data: { state: "RELEASED" }
     });
     if (released.count !== 1) return false;
@@ -100,15 +109,16 @@ async function releaseReservation(id, client = prisma) {
  * every instance concurrently: each release is a compare-and-set.
  */
 async function reconcileExpiredReservations(client = prisma, { limit = 100 } = {}) {
+  const cutoff = new Date();
   const lapsed = await client.uploadReservation.findMany({
-    where: { state: "PENDING", leaseUntil: { lt: new Date() } },
+    where: { state: "PENDING", leaseUntil: { lt: cutoff } },
     orderBy: { leaseUntil: "asc" },
     take: limit,
     select: { id: true }
   });
   let released = 0;
   for (const { id } of lapsed) {
-    if (await releaseReservation(id, client).catch(() => false)) released += 1;
+    if (await releaseReservation(id, client, { lapsedBefore: cutoff }).catch(() => false)) released += 1;
   }
   return released;
 }

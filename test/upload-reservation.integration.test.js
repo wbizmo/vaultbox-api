@@ -348,3 +348,32 @@ test('SIGKILL at "reservation-tx": reservation and quota increment roll back tog
   assert.equal((await f.account()).reservedUploadBytes, 0n, "and neither was the quota increment");
   assert.equal(await reconcileExpiredReservations(), 0);
 });
+
+test("the sweeper's release is conditional on the lease still being lapsed: a renewal between its read and write wins", async (t) => {
+  const f = await fixture(t);
+  const reservation = await createReservation(f.user.id, 33n, 60_000);
+  await f.lapse();
+
+  // The heartbeat renews right after the sweeper has read the lapsed row and before it releases it.
+  const interposed = {
+    uploadReservation: {
+      findMany: async (args) => {
+        const found = await prisma.uploadReservation.findMany(args);
+        await prisma.uploadReservation.update({
+          where: { id: reservation.id },
+          data: { leaseUntil: new Date(Date.now() + 60_000) }
+        });
+        return found;
+      }
+    },
+    $transaction: (...args) => prisma.$transaction(...args)
+  };
+  assert.equal(await reconcileExpiredReservations(interposed), 0, "a freshly renewed upload must not be released");
+  const [row] = await f.rows();
+  assert.equal(row.state, "PENDING");
+  assert.equal((await f.account()).reservedUploadBytes, 33n);
+
+  // Unconditional release (route cleanup) is unaffected.
+  assert.equal(await releaseReservation(reservation.id), true);
+  assert.equal((await f.account()).reservedUploadBytes, 0n);
+});
