@@ -132,10 +132,12 @@ Render / Fastify API
   +--> Neon PostgreSQL
   |      users, plans, committed/reserved quota,
   |      files/folders, upload sessions/parts,
-  |      download sessions, audit logs
+  |      download sessions, audit logs,
+  |      plan entitlements, upload reservations,
+  |      idempotency keys
   |
   +--> Upstash Redis
-  |      short-lived auth cache, throttling, idempotency
+  |      short-lived auth cache, throttling
   |
   +--> Storage adapter
          current provider: Render-local filesystem
@@ -186,7 +188,7 @@ The upload-session/part model maps naturally to future multipart object-storage 
 
 ### Folders
 
-- `POST /folders`
+- `POST /folders` (supports an `Idempotency-Key` header for retry-safe creation; scoped per user, kept 24 h)
 - `GET /folders`
 - `PATCH /folders/:id`
 - `DELETE /folders/:id`

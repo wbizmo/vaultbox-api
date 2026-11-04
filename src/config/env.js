@@ -52,6 +52,10 @@ function getConfig() {
       min: 2,
       max: 3600
     }),
+    idempotencyLockTimeoutMs: parseInteger(process.env.IDEMPOTENCY_LOCK_TIMEOUT_MS, 5000, {
+      min: 100,
+      max: 60000
+    }),
     uploadMaxParts: parseInteger(process.env.UPLOAD_MAX_PARTS, 10000, { min: 1, max: 10000 }),
     uploadSuggestedParallelParts: parseInteger(process.env.UPLOAD_SUGGESTED_PARALLEL_PARTS, 4, {
       min: 1,

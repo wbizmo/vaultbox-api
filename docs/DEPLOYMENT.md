@@ -45,6 +45,7 @@ Upload/download controls can be tuned with:
 - `MAX_UPLOAD_BYTES`
 - `UPLOAD_CHUNK_BYTES`
 - `UPLOAD_SESSION_EXPIRES_MINUTES`
+- `IDEMPOTENCY_LOCK_TIMEOUT_MS` (default 5000; how long an identical in-flight request is waited for before the caller gets 409 + `Retry-After`)
 - `UPLOAD_RESERVATION_LEASE_SECONDS` (default 120; lease for one-shot upload reservations, renewed while the upload is alive)
 - `UPLOAD_COMPLETION_LEASE_SECONDS` (default 120; lease renewed by heartbeat during completion)
 - `UPLOAD_MAX_PARTS`
@@ -86,8 +87,12 @@ Before this release any user could self-select the seeded Basic/Pro plans. The s
 The production database must include migrations through:
 
 ```text
-20261104230000_upload_reservations
+20261104240000_idempotency_keys
 ```
+
+(`20261104230000_upload_reservations` and earlier migrations precede it.) `20261104240000_idempotency_keys` adds the additive `IdempotencyKey` table only.
+
+**Idempotency now lives in PostgreSQL.** Folder-creation idempotency no longer uses Redis, so Redis outages, restarts and multiple replicas cannot cause duplicate execution; Redis is used only for the auth cache and throttling. Records expire after 24 hours and are pruned by the shared 5-minute sweeper. Retries made *during* a rolling deploy against an instance still on the previous build use the old per-process fallback and are not deduplicated against the new store.
 
 (`20261104220000_upload_completion_lease` and earlier migrations precede it.) `20261104230000_upload_reservations` adds the additive `UploadReservation` table and enum only.
 

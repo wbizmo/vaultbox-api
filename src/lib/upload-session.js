@@ -307,6 +307,9 @@ async function cleanupUploadSessions(storage, client = prisma) {
   // One-shot upload reservations share this sweeper (lazy require: upload-reservation imports this module).
   await require("./upload-reservation").reconcileExpiredReservations(client).catch(() => 0);
 
+  // Expired idempotency records are pruned by the same shared sweeper (bounded batch).
+  await require("./idempotency").pruneExpiredIdempotencyKeys(client).catch(() => 0);
+
   const terminal = await client.uploadSession.findMany({
     where: {
       status: { in: ["COMPLETED", "ABORTED", "EXPIRED"] },
