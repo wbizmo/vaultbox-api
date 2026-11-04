@@ -38,6 +38,18 @@ jobs:
             echo "${tag} already exists; leaving the existing release untouched."
             exit 0
           fi
+          # A bare tag (no release) is invisible to `gh release view`, and
+          # `gh release create --target` does not move an existing tag.
+          # Refuse to publish unless the tag is absent or already on RELEASE_SHA.
+          refs="$(git ls-remote --tags origin "refs/tags/${tag}" "refs/tags/${tag}^{}")"
+          tag_sha="$(printf '%s\n' "$refs" | awk -v t="refs/tags/${tag}^{}" '$2==t{print $1}')"
+          if [ -z "$tag_sha" ]; then
+            tag_sha="$(printf '%s\n' "$refs" | awk -v t="refs/tags/${tag}" '$2==t{print $1}')"
+          fi
+          if [ -n "$tag_sha" ] && [ "$tag_sha" != "$RELEASE_SHA" ]; then
+            echo "::error::Tag ${tag} already points to ${tag_sha}, not CI-verified commit ${RELEASE_SHA}; refusing to publish."
+            exit 1
+          fi
           title="$(head -n 1 "$notes" | sed 's/^# *//')"
           gh release create "$tag" \
             --repo "$GITHUB_REPOSITORY" \
