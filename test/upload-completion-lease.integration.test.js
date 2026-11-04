@@ -120,7 +120,20 @@ async function fixture(t) {
   const account = () => prisma.user.findUnique({ where: { id: user.id } });
   const row = (id) => prisma.uploadSession.findUnique({ where: { id } });
 
-  return { app, storage, root, user, headers, session, complete, account, row };
+  /**
+   * Make the lease lapse and recover the session. The live heartbeat may renew the lease
+   * between the expiry write and the sweep, so retry a bounded number of times.
+   */
+  async function forceRecovery(id) {
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      await prisma.uploadSession.update({ where: { id }, data: { completionLeaseUntil: new Date(Date.now() - 1000) } });
+      await cleanupUploadSessions(storage);
+      if ((await row(id)).status !== "COMPLETING") return;
+    }
+    assert.fail(`session ${id} was not recovered`);
+  }
+
+  return { app, storage, root, user, headers, session, complete, account, row, forceRecovery };
 }
 
 test("a slow but healthy completion keeps its lease and is never reclaimed by cleanup", async (t) => {
@@ -219,11 +232,7 @@ test("a recovered zombie completer is fenced: it cannot publish a second file or
   await gate.entered;
 
   // The zombie stalls; its lease lapses and the session is recovered and re-completed by another request.
-  await prisma.uploadSession.update({
-    where: { id: s.id },
-    data: { completionLeaseUntil: new Date(Date.now() - 1000) }
-  });
-  await cleanupUploadSessions(f.storage);
+  await f.forceRecovery(s.id);
   assert.equal((await f.row(s.id)).status, "UPLOADING");
   const winner = await f.complete(s.id);
   assert.equal(winner.statusCode, 200, winner.body);
@@ -326,8 +335,7 @@ test("a zombie cannot commit while a newer completer holds the lease", async (t)
   assert.ok(tokenA);
 
   // A's lease lapses; the session is recovered and a new completer B claims it and stalls too.
-  await prisma.uploadSession.update({ where: { id: s.id }, data: { completionLeaseUntil: new Date(Date.now() - 1000) } });
-  await cleanupUploadSessions(f.storage);
+  await f.forceRecovery(s.id);
   const gateB = f.storage.arm();
   const successor = f.complete(s.id);
   await gateB.entered;
@@ -350,4 +358,75 @@ test("a zombie cannot commit while a newer completer holds the lease", async (t)
   const account = await f.account();
   assert.equal(account.storageUsed, s.size);
   assert.equal(account.reservedUploadBytes, 0n);
+});
+
+test("recovery is compare-and-set: a renewal landing between its read and its write wins", async (t) => {
+  const f = await fixture(t);
+
+  async function recoverWithInterleavedRenewal(expiresAt) {
+    const s = await f.session();
+    await prisma.uploadSession.update({
+      where: { id: s.id },
+      data: { status: "COMPLETING", completionToken: "live", completionLeaseUntil: new Date(Date.now() - 1000), expiresAt }
+    });
+    const observed = await f.row(s.id);
+
+    // Wrap the transaction client so the heartbeat's renewal commits right after
+    // recovery's findFirst has judged the lease stale and before it writes.
+    const interposed = {
+      $transaction: (fn) => prisma.$transaction((tx) => fn(new Proxy(tx, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop);
+          if (prop !== "uploadSession") return typeof value === "function" ? value.bind(target) : value;
+          return new Proxy(value, {
+            get(model, name) {
+              const member = Reflect.get(model, name);
+              if (name !== "findFirst") return typeof member === "function" ? member.bind(model) : member;
+              return async (...args) => {
+                const found = await member.apply(model, args);
+                await prisma.uploadSession.updateMany({
+                  where: { id: s.id, completionToken: "live" },
+                  data: { completionLeaseUntil: new Date(Date.now() + 60_000) }
+                });
+                return found;
+              };
+            }
+          });
+        }
+      })))
+    };
+    const outcome = await recoverStaleCompletion(observed, interposed);
+    return { s, outcome };
+  }
+
+  // Would-be UPLOADING recovery.
+  const valid = await recoverWithInterleavedRenewal(new Date(Date.now() + 3_600_000));
+  assert.equal(valid.outcome, null, "a renewed lease must not be reverted");
+  const kept = await f.row(valid.s.id);
+  assert.equal(kept.status, "COMPLETING");
+  assert.equal(kept.completionToken, "live");
+
+  // Would-be EXPIRED recovery: the reservation must not be released either.
+  const expiring = await recoverWithInterleavedRenewal(new Date(Date.now() - 1000));
+  assert.equal(expiring.outcome, null, "a renewed lease must not be expired");
+  assert.equal((await f.row(expiring.s.id)).status, "COMPLETING");
+  // Two live sessions of 12 bytes each are still reserved: neither recovery released anything.
+  assert.equal((await f.account()).reservedUploadBytes, 24n, "nothing was released");
+});
+
+test("legacy COMPLETING rows without a lease are recovered by the old age rule", async (t) => {
+  const f = await fixture(t);
+  const fresh = await f.session();
+  const old = await f.session();
+  const longAgo = new Date(Date.now() - 31 * 60 * 1000);
+  await prisma.uploadSession.updateMany({ where: { id: { in: [fresh.id, old.id] } }, data: { status: "COMPLETING" } });
+  // updatedAt is managed by Prisma; set it with SQL to model a row claimed long ago by an older build.
+  await prisma.$executeRaw`UPDATE "UploadSession" SET "updatedAt" = ${longAgo} WHERE "id" = ${old.id}`;
+
+  await cleanupUploadSessions(f.storage);
+  assert.equal((await f.row(fresh.id)).status, "COMPLETING", "a recent lease-less claim is left alone");
+  assert.equal((await f.row(old.id)).status, "UPLOADING", "an old lease-less claim is recovered");
+
+  const retry = await f.complete(old.id);
+  assert.equal(retry.statusCode, 200, retry.body);
 });

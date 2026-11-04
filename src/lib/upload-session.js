@@ -185,6 +185,26 @@ function startLeaseHeartbeat(sessionId, token, leaseMs, client = prisma) {
   return { state, stop: () => clearInterval(timer) };
 }
 
+// COMPLETING rows with no lease predate this feature (claimed before the migration, or by a
+// previous-build instance during a rolling deploy); they fall back to the old age rule.
+const LEGACY_COMPLETING_STALE_MS = 30 * 60 * 1000;
+
+function staleCompletionWhere(now = new Date()) {
+  return {
+    status: "COMPLETING",
+    OR: [
+      { completionLeaseUntil: { lt: now } },
+      { completionLeaseUntil: null, updatedAt: { lte: new Date(now.getTime() - LEGACY_COMPLETING_STALE_MS) } }
+    ]
+  };
+}
+
+function isStaleCompletion(session, now = new Date()) {
+  if (session.status !== "COMPLETING") return false;
+  if (session.completionLeaseUntil) return session.completionLeaseUntil < now;
+  return session.updatedAt <= new Date(now.getTime() - LEGACY_COMPLETING_STALE_MS);
+}
+
 /**
  * Recover sessions whose completer stopped heartbeating (crashed or stalled).
  * Under the same lock order: a still-valid session returns to UPLOADING so the
@@ -194,26 +214,30 @@ function startLeaseHeartbeat(sessionId, token, leaseMs, client = prisma) {
 async function recoverStaleCompletion(session, client = prisma) {
   return retryOnConflict(() => client.$transaction(async (tx) => {
     await lockUserForUpdate(tx, session.userId);
+    const now = new Date();
     const stale = await tx.uploadSession.findFirst({
-      where: {
-        id: session.id,
-        status: "COMPLETING",
-        completionLeaseUntil: { lt: new Date() }
-      }
+      where: { id: session.id, ...staleCompletionWhere(now) }
     });
     if (!stale) return null;
 
-    if (stale.expiresAt > new Date()) {
-      await tx.uploadSession.update({
-        where: { id: stale.id },
-        data: { status: "UPLOADING", completionToken: null, completionLeaseUntil: null }
+    // Compare-and-set on exactly what was observed. The heartbeat does not take the
+    // User lock, so it can renew between the read above and the writes below; a
+    // renewal changes completionLeaseUntil/token and makes these updates match nothing.
+    const stillStale = { id: stale.id, completionToken: stale.completionToken, ...staleCompletionWhere(now) };
+    const cleared = { completionToken: null, completionLeaseUntil: null };
+
+    if (stale.expiresAt > now) {
+      const reverted = await tx.uploadSession.updateMany({
+        where: stillStale,
+        data: { status: "UPLOADING", ...cleared }
       });
-      return "UPLOADING";
+      return reverted.count === 1 ? "UPLOADING" : null;
     }
-    await tx.uploadSession.update({
-      where: { id: stale.id },
-      data: { status: "EXPIRED", completionToken: null, completionLeaseUntil: null }
+    const expired = await tx.uploadSession.updateMany({
+      where: stillStale,
+      data: { status: "EXPIRED", ...cleared }
     });
+    if (expired.count !== 1) return null;
     await releaseUploadReservation(stale.userId, stale.expectedSize, tx);
     return "EXPIRED";
   }));
@@ -234,7 +258,7 @@ async function cleanupUploadSessions(storage, client = prisma) {
         { status: "UPLOADING", expiresAt: { lte: now } },
         // Only completers that stopped heartbeating are recovered; a long but
         // healthy assembly keeps renewing its lease and is never reclaimed.
-        { status: "COMPLETING", completionLeaseUntil: { lt: now } }
+        staleCompletionWhere(now)
       ]
     },
     take: 100
@@ -278,6 +302,7 @@ module.exports = {
   relinquishCompletion,
   startLeaseHeartbeat,
   recoverStaleCompletion,
+  isStaleCompletion,
   expireIfNeeded,
   cleanupUploadSessions
 };

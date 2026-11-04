@@ -19,6 +19,7 @@ const {
   relinquishCompletion,
   startLeaseHeartbeat,
   recoverStaleCompletion,
+  isStaleCompletion,
   expireIfNeeded,
   cleanupUploadSessions
 } = require("../lib/upload-session");
@@ -372,7 +373,7 @@ async function uploadRoutes(app) {
       const response = await completedResponse(request.user.id, session);
       return response || reply.code(409).send({ message: "Completed upload file is unavailable" });
     }
-    if (session.status === "COMPLETING" && session.completionLeaseUntil && session.completionLeaseUntil < new Date()) {
+    if (isStaleCompletion(session)) {
       // The previous completer stopped heartbeating: recover it now rather than
       // making the client wait for the periodic cleanup.
       const outcome = await recoverStaleCompletion(session);
