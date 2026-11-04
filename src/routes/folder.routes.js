@@ -1,6 +1,6 @@
 const prisma = require("../lib/prisma");
 const { requireAuth } = require("../middleware/auth");
-const { reserve, complete } = require("../lib/idempotency");
+const { validateIdempotencyKey, runIdempotent } = require("../lib/idempotency");
 const { decodeCursor, cursorWhere, cursorOrderBy, finishCursorPage } = require("../lib/pagination");
 
 const folderCursorOptions = { sort: "createdAt", order: "desc", type: "date" };
@@ -11,7 +11,14 @@ async function folderRoutes(app) {
     schema: {
       tags: ["Folders"],
       summary: "Create folder",
+      description: "Send an `Idempotency-Key` header (1-128 chars of letters, digits and `. _ : ~ -`) to make retries safe. The same user, key and body replays the original response (`Idempotent-Replay: true`); the same key with a different body returns 422; an identical request still running longer than the wait returns 409 with `Retry-After`. Keys are scoped to the authenticated user and kept for 24 hours.",
       security: [{ bearerAuth: [] }],
+      headers: {
+        type: "object",
+        properties: {
+          "idempotency-key": { type: "string", description: "Optional retry-safety key, scoped to the authenticated user." }
+        }
+      },
       body: {
         type: "object",
         additionalProperties: false,
@@ -23,28 +30,48 @@ async function folderRoutes(app) {
     const name = request.body.name.trim();
     if (!name) return reply.code(400).send({ message: "Folder name is required" });
 
-    const idempotencyKey = request.headers["idempotency-key"];
-    const idempotencyPayload = { userId: request.user.id, name };
-    const reservation = await reserve("folder-create", idempotencyKey, idempotencyPayload, 600);
-
-    if (!reservation.acquired) {
-      if (!reservation.samePayload) {
-        return reply.code(422).send({ message: "Idempotency key was already used with a different request" });
-      }
-      if (reservation.replay) {
-        reply.header("Idempotent-Replay", "true");
-        return reply.code(201).send(reservation.replay);
-      }
-      return reply.code(409).send({ message: "An identical request is still in progress" });
+    let idempotencyKey;
+    try {
+      idempotencyKey = validateIdempotencyKey(request.headers["idempotency-key"]);
+    } catch (error) {
+      return reply.code(400).send({ message: error.message });
     }
 
-    const folder = await prisma.folder.create({
-      data: { name, userId: request.user.id }
-    });
-    const response = { message: "Folder created successfully", folder };
-    await complete("folder-create", idempotencyKey, idempotencyPayload, response, 600);
+    const createFolder = (client) => client.folder.create({ data: { name, userId: request.user.id } });
 
-    return reply.code(201).send(response);
+    if (!idempotencyKey) {
+      const folder = await createFolder(prisma);
+      return reply.code(201).send({ message: "Folder created successfully", folder });
+    }
+
+    // The idempotency claim, the folder and the stored response commit in one transaction:
+    // a retry after any failure sees either nothing (and runs again) or the original result.
+    let result;
+    try {
+      result = await runIdempotent({
+        userId: request.user.id,
+        operation: "folder.create",
+        key: idempotencyKey,
+        payload: { name },
+        lockTimeoutMs: app.vaultboxConfig?.idempotencyLockTimeoutMs,
+        execute: async (tx) => ({
+          status: 201,
+          body: { message: "Folder created successfully", folder: await createFolder(tx) }
+        })
+      });
+    } catch (error) {
+      if (error.code === "IDEMPOTENCY_IN_PROGRESS") {
+        reply.header("Retry-After", "1");
+        return reply.code(409).send({ message: "An identical request is still in progress; retry shortly" });
+      }
+      throw error;
+    }
+
+    if (result.mismatch) {
+      return reply.code(422).send({ message: "Idempotency key was already used with a different request" });
+    }
+    if (result.replayed) reply.header("Idempotent-Replay", "true");
+    return reply.code(result.status).send(result.body);
   });
 
   app.get("/folders", {
