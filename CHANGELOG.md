@@ -2,6 +2,18 @@
 
 All notable changes to VaultBox API are documented here.
 
+## [2.1.1] - 2026-11-04
+
+### Security
+
+- Upgrade the pinned Node.js runtime from 24.19.0 to **24.22.2** (Node.js 24 LTS), which includes the 2026-10-21 security release (24.22.1) fixes.
+- Refresh in-range transitive/direct dependencies in the lockfiles (including `fastify` 5.12.8, `fast-jwt` 6.3.6, `@fastify/busboy` 3.2.4, `fast-uri`, `ip-address`, `brace-expansion`) so `npm audit --audit-level=high` passes again. No `package.json` dependency ranges changed.
+
+### Changed
+
+- CI now fails if the running Node.js version differs from `.node-version`.
+- The release workflow derives the version from `package.json`, runs only after the CI workflow succeeded on the exact commit, and no longer hardcodes v2.1.0.
+
 ## [2.1.0] - 2026-09-09
 
 ### Added

@@ -1,10 +1,10 @@
 # VaultBox API
 
-VaultBox is a secure cloud-storage API built with Fastify, Prisma, Neon PostgreSQL, Upstash Redis, and Render. **v2.1.0** adds durable resumable chunked uploads and completes an efficiency pass across transfer I/O, quota accounting, database access, Redis coordination, pagination, search, and deployment safety.
+VaultBox is a secure cloud-storage API built with Fastify, Prisma, Neon PostgreSQL, Upstash Redis, and Render. **v2.1.x** adds durable resumable chunked uploads and completes an efficiency pass across transfer I/O, quota accounting, database access, Redis coordination, pagination, search, and deployment safety.
 
-- Current release: **v2.1.0 — Resumable Upload & Efficiency Release**
+- Current release: **v2.1.1 — Node.js security maintenance** (functionally identical to v2.1.0, the Resumable Upload & Efficiency Release)
 - Changelog: [`CHANGELOG.md`](./CHANGELOG.md)
-- Release notes: [`docs/RELEASE_NOTES_v2.1.0.md`](./docs/RELEASE_NOTES_v2.1.0.md)
+- Release notes: [`docs/RELEASE_NOTES_v2.1.1.md`](./docs/RELEASE_NOTES_v2.1.1.md) · [`v2.1.0`](./docs/RELEASE_NOTES_v2.1.0.md)
 - Upload protocol: [`docs/UPLOADS.md`](./docs/UPLOADS.md)
 - Engineering record: [`docs/V2_ENGINEERING_PLAN.md`](./docs/V2_ENGINEERING_PLAN.md)
 

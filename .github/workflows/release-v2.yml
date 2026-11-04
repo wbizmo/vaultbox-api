@@ -1,32 +1,58 @@
-name: Publish VaultBox v2.1.0
+name: Publish release
 
+# Publishes the GitHub release for the version in package.json, but only after
+# the "VaultBox CI" workflow succeeded on the exact commit on main.
 on:
-  push:
-    branches:
-      - main
+  workflow_run:
+    workflows: ["VaultBox CI"]
+    types: [completed]
+    branches: [main]
 
 permissions:
   contents: write
 
 jobs:
   release:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout the exact CI-verified commit
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
-      - name: Publish v2.1.0 release
+      - name: Publish release for package.json version
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
-          if gh release view v2.1.0 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "v2.1.0 already exists; leaving the existing release untouched."
+          version="$(node -p "require('./package.json').version")"
+          tag="v${version}"
+          notes="docs/RELEASE_NOTES_${tag}.md"
+          if [ ! -f "$notes" ]; then
+            echo "No $notes for ${tag}; not publishing."
             exit 0
           fi
-
-          gh release create v2.1.0 \
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "${tag} already exists; leaving the existing release untouched."
+            exit 0
+          fi
+          # A bare tag (no release) is invisible to `gh release view`, and
+          # `gh release create --target` does not move an existing tag.
+          # Refuse to publish unless the tag is absent or already on RELEASE_SHA.
+          refs="$(git ls-remote --tags origin "refs/tags/${tag}" "refs/tags/${tag}^{}")"
+          tag_sha="$(printf '%s\n' "$refs" | awk -v t="refs/tags/${tag}^{}" '$2==t{print $1}')"
+          if [ -z "$tag_sha" ]; then
+            tag_sha="$(printf '%s\n' "$refs" | awk -v t="refs/tags/${tag}" '$2==t{print $1}')"
+          fi
+          if [ -n "$tag_sha" ] && [ "$tag_sha" != "$RELEASE_SHA" ]; then
+            echo "::error::Tag ${tag} already points to ${tag_sha}, not CI-verified commit ${RELEASE_SHA}; refusing to publish."
+            exit 1
+          fi
+          title="$(head -n 1 "$notes" | sed 's/^# *//')"
+          gh release create "$tag" \
             --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
-            --title "VaultBox API v2.1.0 — Resumable Upload & Efficiency Release" \
-            --notes-file docs/RELEASE_NOTES_v2.1.0.md
+            --target "$RELEASE_SHA" \
+            --title "$title" \
+            --notes-file "$notes"
