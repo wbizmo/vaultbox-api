@@ -40,10 +40,16 @@ async function lockActiveUserForUpdate(tx, userId) {
  * concurrent creations by one account do not block each other (and cannot deadlock by upgrading a
  * foreign-key share lock), but a suspension -- an UPDATE of this row -- still cannot interleave.
  */
-async function lockActiveUserShared(tx, userId) {
-  const rows = await tx.$queryRaw`SELECT "status"::text AS "status" FROM "User" WHERE "id" = ${userId} FOR SHARE`;
+async function lockActiveUserShared(tx, userId, expectedAuthVersion = undefined) {
+  const rows = await tx.$queryRaw`SELECT "status"::text AS "status", "authVersion" AS "authVersion" FROM "User" WHERE "id" = ${userId} FOR SHARE`;
   if (rows.length === 0) return false;
   assertActiveStatus(rows[0].status);
+  // A request authenticated before a session revocation (logout everywhere) commits must not create a
+  // credential afterwards: the revocation's UPDATE of the User row waits for this lock, so the version
+  // read here is the one the revocation either already bumped or has yet to bump.
+  if (expectedAuthVersion !== undefined && Number(rows[0].authVersion) !== expectedAuthVersion) {
+    throw new AppError(401, "SESSION_REVOKED", "Session is no longer valid; please sign in again");
+  }
   return true;
 }
 

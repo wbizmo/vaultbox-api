@@ -128,6 +128,7 @@ model DownloadToken {
   userId    String
   expiresAt DateTime
   usedAt    DateTime?
+  revokedAt DateTime?
   createdAt DateTime  @default(now())
 
   file File @relation(fields: [fileId], references: [id])

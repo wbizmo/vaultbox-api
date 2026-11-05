@@ -96,6 +96,29 @@ UPDATE "User" SET "role" = 'USER', "authVersion" = "authVersion" + 1 WHERE "emai
 
 **Errors.** Refusals are decided before any download header is set: `404` (unknown token, missing file or bytes), `410` (expired), `403` (inactive account), `416` + `Content-Range: bytes */<size>` (unsatisfiable range).
 
+### Download token lifecycle and URL exposure
+
+**Threat model.** `POST /files/:id/download-token` is *authenticated* (your JWT, active account, owner of the file); the resulting `/download/:token` URL is a *bearer credential*: anyone who holds the URL can download that one file until it expires or is revoked, without an account. The token is 32 random bytes (43 URL-safe characters), only its SHA-256 is stored, and it grants exactly one file. A leaked URL therefore means leaked file content for the remaining lifetime; it cannot be used for anything else.
+
+**Lifetime and revocation.** Sessions expire after `DOWNLOAD_TOKEN_EXPIRES_MINUTES` (default 15) and can be revoked sooner:
+
+| Action | Effect |
+| --- | --- |
+| `DELETE /download-sessions/:id` | Revokes one session you own (`204`; `404` if it is not yours; repeating it is harmless). |
+| `DELETE /files/:id/download-sessions` | Revokes every active session of one of your files; returns `{ "revoked": n }`. |
+| Log out everywhere (`revokeSessions`) | Also revokes all of that user's unexpired download sessions, in the same transaction. |
+| Account suspension / deletion | Already refuses downloads (`403`) on the next request. |
+
+`id` comes from the creation response and is not secret; a session is never looked up by token on these routes. Each revocation made by the two `DELETE` routes writes `DOWNLOAD_SESSION_REVOKED` (details = the session id) in the same transaction; log out everywhere revokes download sessions without writing that event.
+
+**Expiry and revocation during a transfer.** The check happens when a request *begins*: a revoked or expired session answers `410` to every new `GET`/`HEAD`, including additional ranges of a download that is already in progress, so clients must request all ranges they need before the session ends (`DOWNLOAD_TOKEN_EXPIRES_MINUTES` should cover the slowest expected transfer). A stream that is already open is **not interrupted**: it runs to completion (bounded by the client's connection), because tearing down a response mid-flight would only produce truncated files. Neither revocation, suspension nor deleting the stored file stops an open stream (the local adapter reads through an open file descriptor). Nothing at the application level ends an open transfer; the only lever is the process itself. Restarting the instance is a broad mitigation, not an immediate cut-off: a graceful shutdown (`SIGTERM`/`SIGINT`) lets active transfers finish and the process force-exits after its 10-second shutdown timeout, interrupting whatever is still running, and it affects every transfer on that instance. Parallel ranges, `ETag` and `If-Range` behave as before while the session is live.
+
+**What the application guarantees.** The raw token is never written by the application: request logs use `/download/[redacted]`, audit `details` and the `/metrics` counters carry only ids and counts, responses are `Cache-Control: private, no-store`, and every response (including refusals) sends `Referrer-Policy: no-referrer`. This is covered by tests that read the real log stream.
+
+**What the application cannot guarantee (operator checklist).** Anything in front of the app sees the full URL: configure each of these to drop or mask the path after `/download/` (or the whole query/path for that route) -- the platform/edge access log (Render request logs), any CDN or WAF, load-balancer logs, APM/trace tools (URL attributes on spans), error trackers and uptime monitors. Browsers keep the URL in history, bookmarks and the address bar; a download link pasted into chat or e-mail is retained by those systems. Safe sharing: issue a session per recipient, keep the expiry short, revoke it as soon as the transfer is done, and prefer sending the *file ID* and letting the recipient authenticate when possible.
+
+**Header-based alternative (considered, deferred).** Accepting the token in an `Authorization` header would keep it out of URLs for non-browser clients, but browsers cannot send custom headers for plain downloads, parallel-range clients already work with the URL form, and a second credential channel doubles the surface to redact and test. It is intentionally not added in this release; the revocation and redaction guarantees above are the mitigation.
+
 ## Audit events
 
 Each audited state change (the critical events listed below) is written **in the same PostgreSQL transaction as the change** (`src/lib/audit.js`). The two therefore always agree:
@@ -105,7 +128,7 @@ Each audited state change (the critical events listed below) is written **in the
 
 | Class | Events | If the audit store is unavailable |
 | --- | --- | --- |
-| **Critical, in the change's transaction** | `ACCOUNT_REGISTERED`, `FILE_UPLOADED`, `FILE_DELETED`, `UPLOAD_SESSION_CREATED` / `_COMPLETED` / `_ABORTED`, `DOWNLOAD_SESSION_CREATED`, `DOWNLOAD_SESSION_STARTED` (atomic with the `usedAt` flag), `PLAN_CHANGED`, `USER_SUSPENDED` / `_REACTIVATED` / `_DELETED`, `PAYMENT_FAILED` | the operation fails before commit (500) and leaves no trace |
+| **Critical, in the change's transaction** | `ACCOUNT_REGISTERED`, `FILE_UPLOADED`, `FILE_DELETED`, `UPLOAD_SESSION_CREATED` / `_COMPLETED` / `_ABORTED`, `DOWNLOAD_SESSION_CREATED`, `DOWNLOAD_SESSION_STARTED` (atomic with the `usedAt` flag), `DOWNLOAD_SESSION_REVOKED` (atomic with `revokedAt`), `PLAN_CHANGED`, `USER_SUSPENDED` / `_REACTIVATED` / `_DELETED`, `PAYMENT_FAILED` | the operation fails before commit (500) and leaves no trace |
 | **Critical, no state change** | `LOGIN` | written before any token exists; on failure no token is issued |
 | **Best effort, after the commit** | `FILE_DELETED_METADATA_ONLY` (the stored bytes could not be removed after the deletion committed) | the failure is logged and swallowed; it cannot change the outcome of the already-committed operation |
 

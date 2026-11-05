@@ -28,4 +28,28 @@ async function recordFirstDownload(record, ip, client = prisma) {
   });
 }
 
-module.exports = { recordFirstDownload };
+/**
+ * Revoke one of the owner's download sessions (or all active ones for a file). Revocation is a cleanup path:
+ * it never requires the account to be ACTIVE and is idempotent. Only sessions that were still usable
+ * (unexpired, not yet revoked) are changed and audited; the audit row carries the session id, never the bearer
+ * value or its hash. Requests that begin after the commit are refused with 410; a stream already open is
+ * not interrupted (see docs/DEPLOYMENT.md "Download sessions").
+ */
+async function revokeDownloadSessions(userId, where, ip, client = prisma) {
+  return client.$transaction(async (tx) => {
+    const live = await tx.downloadToken.findMany({
+      where: { ...where, userId, revokedAt: null, expiresAt: { gt: new Date() } },
+      select: { id: true }
+    });
+    let revoked = 0;
+    for (const { id } of live) {
+      const updated = await tx.downloadToken.updateMany({ where: { id, revokedAt: null }, data: { revokedAt: new Date() } });
+      if (updated.count !== 1) continue;
+      revoked += 1;
+      await recordAudit(tx, { action: "DOWNLOAD_SESSION_REVOKED", details: id, userId, ip });
+    }
+    return revoked;
+  });
+}
+
+module.exports = { recordFirstDownload, revokeDownloadSessions };
