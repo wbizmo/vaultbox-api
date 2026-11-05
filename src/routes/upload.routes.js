@@ -455,10 +455,15 @@ async function uploadRoutes(app) {
     const storedName = crypto.randomUUID();
     let assembled;
     try {
-      assembled = await storage.assembleUploadParts(session.id, session.parts, storedName);
+      assembled = await storage.assembleUploadParts(session.id, session.parts, storedName, { signal: app.vaultboxShutdownSignal });
     } catch (error) {
       heartbeat.stop();
       await giveBack();
+      if (error.name === "AbortError") {
+        // Shutdown began mid-assembly: the partial object is gone and the session is retryable.
+        reply.header("Retry-After", "5");
+        return reply.code(503).send({ message: "Server is shutting down; retry completing the upload" });
+      }
       if (error.code === "ENOENT" && Number.isInteger(error.uploadPartNumber)) {
         // Delete only the exact row whose object is missing (a concurrent re-upload creates a
         // different storedName and must not be removed).

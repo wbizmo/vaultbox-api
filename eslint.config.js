@@ -8,6 +8,7 @@ module.exports = [
       ecmaVersion: "latest",
       sourceType: "commonjs",
       globals: {
+        AbortController: "readonly",
         Buffer: "readonly",
         URL: "readonly",
         clearInterval: "readonly",

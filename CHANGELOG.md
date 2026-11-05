@@ -4,6 +4,10 @@ All notable changes to VaultBox API are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Upload assembly settles and cleans up whatever happens to the output stream; shutdown cancels it (#56).** `assembleUploadParts` joined parts with a hand-written write/`drain` loop that listened only for `drain`, so an output stream that was destroyed or closed while the loop waited (a failing or vanished disk) left the completion request waiting forever with its descriptors open (reproduced before the fix). Assembly is now composed with `stream.pipeline`: backpressure, an error or close on either side, and an abort signal all settle promptly, tear down every stream and descriptor, and remove the partial output (but never an object that already existed). SHA-256 stays streaming, parts are concatenated in the given order, byte counts are exact and memory stays bounded. Server shutdown now aborts an in-flight assembly: it cleans up, the completion lease is given back and the client gets `503` + `Retry-After` and can simply retry, instead of the process being killed mid-write. Downloads were already routed through the injected adapter (#83); new tests prove that upload, assembly and download use only the injected adapter, that a client that disconnects mid-download releases its stream and file descriptor, and that 90 concurrent failing assemblies leak neither descriptors nor files. A shared contract suite runs the same behavior (range reads, existing-key refusal, part lifecycle, assembly, abort) against the disk adapter and an in-memory one. No schema or public API change; custom adapters may accept an optional `{ signal }` as a fourth argument to `assembleUploadParts`.
+
 ## [2.2.0] - 2026-11-05
 
 See [`docs/RELEASE_NOTES_v2.2.0.md`](./docs/RELEASE_NOTES_v2.2.0.md) for behavior changes, operator actions, migrations and rollback.
