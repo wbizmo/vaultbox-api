@@ -1,6 +1,7 @@
 const { version } = require("../../package.json");
 const { snapshotMetrics } = require("../lib/metrics");
 const { getThrottleState } = require("../lib/throttle");
+const { fileDeletionStats } = require("../lib/file-deletion");
 const { requireAuth } = require("../middleware/auth");
 const { requireAdmin } = require("../middleware/admin");
 
@@ -44,7 +45,9 @@ async function systemRoutes(app) {
     metrics: {
       ...snapshotMetrics(),
       rateLimiter: getThrottleState(),
-      passwordHashing: app.passwordHasher.stats?.() ?? null
+      passwordHashing: app.passwordHasher.stats?.() ?? null,
+      // Stuck physical deletions: counts, age of the oldest, bytes still on storage (null if the query fails).
+      fileDeletions: await fileDeletionStats().catch(() => null)
     }
   }));
 }

@@ -119,6 +119,21 @@ UPDATE "User" SET "role" = 'USER', "authVersion" = "authVersion" + 1 WHERE "emai
 
 **Header-based alternative (considered, deferred).** Accepting the token in an `Authorization` header would keep it out of URLs for non-browser clients, but browsers cannot send custom headers for plain downloads, parallel-range clients already work with the URL form, and a second credential channel doubles the surface to redact and test. It is intentionally not added in this release; the revocation and redaction guarantees above are the mitigation.
 
+## File deletion and byte cleanup
+
+`DELETE /files/:id` is two steps with different guarantees:
+
+1. **Logical deletion (once-only, atomic).** One statement marks the file `DELETED`, refunds its quota and inserts a `FileDeletion` job; the audit event commits in the same transaction. Repeating `DELETE` is a `404` and changes nothing.
+2. **Physical removal (durable, retried).** The request tries to remove the bytes immediately. If that fails (or the process dies right there), the job stays queued and a worker retries it: every replica runs a sweep every 60 seconds, claiming due jobs under a 2-minute lease (`FOR UPDATE SKIP LOCKED`), so a crashed worker's job is picked up by another once the lease lapses. An object that is already gone counts as success. Failures back off exponentially (30 s doubling to 1 h, with jitter) and a job that fails 8 times is parked as `DEAD` with its last error; nothing is retried automatically after that.
+
+The retry path only ever updates the job row, never `File` or quota, so it cannot refund twice or bring a file back. Finished (`DONE`) jobs are kept 7 days for inspection, then pruned.
+
+**In-flight and new downloads.** A download stream that was already open when the file is deleted keeps reading (the local adapter reads through an open descriptor) and completes; every new download request, and every new download session, for a deleted file is refused (`404`).
+
+**Observability.** The admin `/metrics` response includes `fileDeletions`: `pending`, `retrying`, `dead`, `oldestPendingAgeSeconds`, `oldestDeadAgeSeconds` and `unreclaimedBytes`. Alert on `dead > 0` or on a growing `oldestPendingAgeSeconds`.
+
+**Operating it.** Inspect: `SELECT "fileId", "status", "attempts", "nextAttemptAt", "lastError" FROM "FileDeletion" WHERE "status" <> 'DONE' ORDER BY "createdAt";`. After fixing the storage problem, requeue dead jobs: `UPDATE "FileDeletion" SET "status" = 'PENDING', "attempts" = 0, "nextAttemptAt" = now(), "lockedUntil" = NULL WHERE "status" = 'DEAD';`. Files deleted before this release have no job; their leftover bytes are the subject of the orphan reconciliation work (#55). Rolling back to a build without this table leaves queued jobs unprocessed (they are not lost: they resume when a build with the worker runs again).
+
 ## Storage adapters and stream lifecycle
 
 All upload, assembly and download I/O goes through the adapter injected into the app (`app.vaultboxStorage`); `src/lib/storage.js` supplies the local-disk default. Anything that implements the same interface (see `scripts/memory-storage-adapter.js` and `test/storage-adapter-contract.test.js` for a reference implementation and the behavioral contract) can replace it.

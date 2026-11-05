@@ -8,6 +8,7 @@ const { requireAuth } = require("../middleware/auth");
 const { formatBytes } = require("../lib/bytes");
 const { HashingTransform } = require("../lib/hash-stream");
 const { softDeleteFileWithQuota } = require("../lib/file-delete");
+const { processFileDeletions, removeFileBytesNow, pruneFinishedFileDeletions } = require("../lib/file-deletion");
 const {
   reserveUploadQuota
 } = require("../lib/quota");
@@ -54,6 +55,21 @@ function declaredUploadSize(request, maxUploadBytes) {
 
 async function fileRoutes(app) {
   const storage = app.vaultboxStorage;
+
+  // Byte-removal worker (issue #54). Every replica runs it; FOR UPDATE SKIP LOCKED plus the row lease make
+  // concurrent sweeps safe, and a crashed sweep's rows are simply claimed again once their lease lapses.
+  const sweepFileDeletions = async () => {
+    try {
+      await processFileDeletions(storage);
+      await pruneFinishedFileDeletions();
+    } catch (error) {
+      app.log.warn({ err: error }, "File deletion sweep failed");
+    }
+  };
+  app.addHook("onReady", sweepFileDeletions);
+  const fileDeletionTimer = setInterval(sweepFileDeletions, 60 * 1000);
+  fileDeletionTimer.unref();
+  app.addHook("onClose", async () => clearInterval(fileDeletionTimer));
 
   app.post("/files/upload", {
     preHandler: requireAuth,
@@ -356,14 +372,16 @@ async function fileRoutes(app) {
     });
     if (!file) return reply.code(404).send({ message: "File not found" });
 
-    const removed = await storage.deleteFile(file).catch((error) => {
-      request.log.error({ err: error, fileId: file.id }, "Failed to remove stored file bytes");
+    // The outbox row committed with the deletion, so the bytes are removed eventually even if this attempt
+    // fails or the process dies right here; the worker below (and on every replica) retries with backoff.
+    const removed = await removeFileBytesNow(storage, file.id).catch((error) => {
+      request.log.error({ err: error, fileId: file.id }, "Failed to remove stored file bytes; queued for retry");
       return false;
     });
 
     if (!removed) {
-      // The deletion itself is committed and audited; the leftover bytes are a separate, best-effort
-      // event (durable byte-deletion retries are tracked in #54). Its failure cannot change the outcome.
+      // The deletion itself is committed and audited; the leftover bytes stay queued in the outbox. This
+      // marker event is best-effort and its failure cannot change the outcome.
       await recordAuditBestEffort(prisma, {
         action: "FILE_DELETED_METADATA_ONLY",
         details: file.id,

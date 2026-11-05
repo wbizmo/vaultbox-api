@@ -1,5 +1,10 @@
 const prisma = require("./prisma");
 
+/**
+ * Logical deletion, once-only: mark the file DELETED, refund its quota and enqueue the byte removal
+ * (FileDeletion outbox row) in a single statement. The physical removal is retried by
+ * src/lib/file-deletion.js until it is verified done or explicitly dead-lettered.
+ */
 async function softDeleteFileWithQuota(userId, fileId, client = prisma) {
   const rows = await client.$queryRaw`
     WITH deleted AS (
@@ -30,6 +35,14 @@ async function softDeleteFileWithQuota(userId, fileId, client = prisma) {
       FROM deleted
       WHERE "User"."id" = ${userId}
       RETURNING "User"."id"
+    ),
+    queued AS (
+      -- The durable "remove the bytes" job, in the same statement (and so the same transaction) as the
+      -- status change and the refund. UNIQUE("fileId") plus the ACTIVE guard above make it once-only.
+      INSERT INTO "FileDeletion" ("fileId", "userId", "storedName", "size")
+      SELECT deleted."id", deleted."userId", deleted."storedName", deleted."size" FROM deleted
+      ON CONFLICT ("fileId") DO NOTHING
+      RETURNING "id"
     )
     SELECT deleted.*
     FROM deleted
