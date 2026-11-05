@@ -32,14 +32,25 @@ async function setAccountRole(userId, role, client = prisma) {
   return rows[0] || null;
 }
 
-/** Revoke every outstanding token without changing status or role (e.g. password change, forced logout). */
+/**
+ * Revoke every outstanding token without changing status or role (e.g. password change, forced logout).
+ * Download sessions are bearer credentials too, so the same transaction revokes the user's unexpired ones:
+ * "log out everywhere" must not leave a working download URL behind.
+ */
 async function revokeSessions(userId, client = prisma) {
-  const rows = await client.$queryRaw`
-    UPDATE "User" SET "authVersion" = "authVersion" + 1, "updatedAt" = NOW()
-    WHERE "id" = ${userId}
-    RETURNING "id", "authVersion"
-  `;
-  return rows[0] || null;
+  const run = async (tx) => {
+    const rows = await tx.$queryRaw`
+      UPDATE "User" SET "authVersion" = "authVersion" + 1, "updatedAt" = NOW()
+      WHERE "id" = ${userId}
+      RETURNING "id", "authVersion"
+    `;
+    await tx.$executeRaw`
+      UPDATE "DownloadToken" SET "revokedAt" = NOW()
+      WHERE "userId" = ${userId} AND "revokedAt" IS NULL AND "expiresAt" > NOW()
+    `;
+    return rows[0] || null;
+  };
+  return typeof client.$transaction === "function" ? client.$transaction(run) : run(client);
 }
 
 /** The claim a token must carry. Tokens issued before versioning have no claim and count as 0. */

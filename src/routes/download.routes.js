@@ -5,7 +5,7 @@ const { requireAuth } = require("../middleware/auth");
 const { contentDispositionAttachment } = require("../lib/security");
 const { parseSingleRange, rangeHeader } = require("../lib/range");
 const { createDownloadToken, hashDownloadToken, etagForChecksum } = require("../lib/download-token");
-const { recordFirstDownload } = require("../lib/download-session");
+const { recordFirstDownload, revokeDownloadSessions } = require("../lib/download-session");
 const { throttlePreHandler } = require("../lib/throttle");
 const { lockActiveUserShared } = require("../lib/upload-session");
 
@@ -30,6 +30,11 @@ async function validateDownload(request, reply, checkStorage = false) {
 
   if (!record) {
     reply.code(404).send({ message: "Invalid download token" });
+    return null;
+  }
+
+  if (record.revokedAt) {
+    reply.code(410).send({ message: "Download token has been revoked" });
     return null;
   }
 
@@ -177,9 +182,10 @@ async function downloadRoutes(app) {
     );
     const token = createDownloadToken();
 
+    let sessionId;
     await prisma.$transaction(async (tx) => {
       await lockActiveUserShared(tx, request.user.id);
-      await tx.downloadToken.create({
+      const created = await tx.downloadToken.create({
         data: {
           token: token.hash,
           fileId: file.id,
@@ -187,6 +193,7 @@ async function downloadRoutes(app) {
           expiresAt
         }
       });
+      sessionId = created.id;
       await recordAudit(tx, {
         action: "DOWNLOAD_SESSION_CREATED",
         details: file.id,
@@ -197,6 +204,7 @@ async function downloadRoutes(app) {
 
     return {
       message: "Download session created",
+      id: sessionId,
       token: token.raw,
       expiresAt,
       downloadUrl: `/download/${token.raw}`,
@@ -210,6 +218,37 @@ async function downloadRoutes(app) {
         size: file.size.toString()
       }
     };
+  });
+
+  app.delete("/download-sessions/:id", {
+    preHandler: requireAuth,
+    schema: {
+      tags: ["Downloads"],
+      summary: "Revoke a download session so its URL stops working",
+      security: [{ bearerAuth: [] }],
+      params: { type: "object", required: ["id"], properties: { id: { type: "string" } } }
+    }
+  }, async (request, reply) => {
+    const owned = await prisma.downloadToken.findFirst({
+      where: { id: request.params.id, userId: request.user.id },
+      select: { id: true }
+    });
+    if (!owned) return reply.code(404).send({ message: "Download session not found" });
+    await revokeDownloadSessions(request.user.id, { id: owned.id }, clientIp(request));
+    return reply.code(204).send();
+  });
+
+  app.delete("/files/:id/download-sessions", {
+    preHandler: requireAuth,
+    schema: {
+      tags: ["Downloads"],
+      summary: "Revoke every active download session of one of your files",
+      security: [{ bearerAuth: [] }],
+      params: { type: "object", required: ["id"], properties: { id: { type: "string" } } }
+    }
+  }, async (request) => {
+    const revoked = await revokeDownloadSessions(request.user.id, { fileId: request.params.id }, clientIp(request));
+    return { revoked };
   });
 
   app.get("/files/:id/download-capabilities", {
