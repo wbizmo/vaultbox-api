@@ -1,5 +1,12 @@
 const prisma = require("./prisma");
 
+/*
+ * Every statement that CREATES usage or changes the plan is predicated on the account being ACTIVE at
+ * the moment it executes (a null result is "not admitted"; callers that need the reason hold the user
+ * row lock and read the status, see lockActiveUserForUpdate). releaseUploadReservation is deliberately
+ * not predicated: a suspended account must always be able to give reserved bytes back.
+ */
+
 async function reserveUploadQuota(userId, fileSize, client = prisma) {
   const rows = await client.$queryRaw`
     UPDATE "User" AS u
@@ -8,6 +15,7 @@ async function reserveUploadQuota(userId, fileSize, client = prisma) {
       "updatedAt" = NOW()
     FROM "Plan" AS p
     WHERE u."id" = ${userId}
+      AND u."status" = 'ACTIVE'::"UserStatus"
       AND u."planId" = p."id"
       AND u."storageUsed" + u."reservedUploadBytes" + ${fileSize} <= p."storageLimit"
     RETURNING
@@ -28,6 +36,7 @@ async function reservePendingUploadQuota(userId, bytes, client = prisma) {
       "updatedAt" = NOW()
     FROM "Plan" AS p
     WHERE u."id" = ${userId}
+      AND u."status" = 'ACTIVE'::"UserStatus"
       AND u."planId" = p."id"
       AND u."storageUsed" + u."reservedUploadBytes" + ${bytes} <= p."storageLimit"
     RETURNING
@@ -62,6 +71,7 @@ async function commitUploadReservation(userId, bytes, client = prisma) {
       "updatedAt" = NOW()
     FROM "Plan" AS p
     WHERE u."id" = ${userId}
+      AND u."status" = 'ACTIVE'::"UserStatus"
       AND u."planId" = p."id"
       AND u."reservedUploadBytes" >= ${bytes}
       AND u."storageUsed" + u."reservedUploadBytes" <= p."storageLimit"
@@ -83,6 +93,7 @@ async function switchPlanIfFits(userId, planId, client = prisma) {
       "updatedAt" = NOW()
     FROM "Plan" AS p
     WHERE u."id" = ${userId}
+      AND u."status" = 'ACTIVE'::"UserStatus"
       AND p."id" = ${planId}
       AND u."storageUsed" + u."reservedUploadBytes" <= p."storageLimit"
     RETURNING

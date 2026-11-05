@@ -1,6 +1,7 @@
 const prisma = require("../lib/prisma");
 const { requireAuth } = require("../middleware/auth");
 const { validateIdempotencyKey, runIdempotent } = require("../lib/idempotency");
+const { lockActiveUserShared } = require("../lib/upload-session");
 const { decodeCursor, cursorWhere, cursorOrderBy, finishCursorPage } = require("../lib/pagination");
 
 const folderCursorOptions = { sort: "createdAt", order: "desc", type: "date" };
@@ -37,10 +38,15 @@ async function folderRoutes(app) {
       return reply.code(400).send({ message: error.message });
     }
 
-    const createFolder = (client) => client.folder.create({ data: { name, userId: request.user.id } });
+    // Both paths fence on the account state: the folder is created in a transaction that holds a
+    // shared lock on the owner's row and requires ACTIVE (see lockActiveUserShared).
+    const createFolder = async (tx) => {
+      await lockActiveUserShared(tx, request.user.id);
+      return tx.folder.create({ data: { name, userId: request.user.id } });
+    };
 
     if (!idempotencyKey) {
-      const folder = await createFolder(prisma);
+      const folder = await prisma.$transaction((tx) => createFolder(tx));
       return reply.code(201).send({ message: "Folder created successfully", folder });
     }
 

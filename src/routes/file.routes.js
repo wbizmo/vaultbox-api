@@ -16,7 +16,7 @@ const {
   linkReservationFile,
   releaseReservation
 } = require("../lib/upload-reservation");
-const { lockUserForUpdate } = require("../lib/upload-session");
+const { lockActiveUserForUpdate } = require("../lib/upload-session");
 const { retryOnConflict } = require("../lib/db-retry");
 const { decodeCursor, cursorWhere, cursorOrderBy, finishCursorPage } = require("../lib/pagination");
 
@@ -166,7 +166,9 @@ async function fileRoutes(app) {
     try {
       const committed = await retryOnConflict(() => prisma.$transaction(async (tx) => {
         // Lock order: User first (see lib/upload-session.js).
-        await lockUserForUpdate(tx, user.id);
+        // Account-state fence at the commit point: a suspension that landed while the body streamed
+        // rejects the commit (403) and the bytes + reservation are given back by the catch below.
+        await lockActiveUserForUpdate(tx, user.id);
         const reservation = expectedSize === null
           ? await reserveUploadQuota(user.id, fileSize, tx)
           : await commitReservation(tx, reservationId, user.id, fileSize);

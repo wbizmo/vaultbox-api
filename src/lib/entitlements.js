@@ -54,6 +54,7 @@ async function switchPlanIfEntitled(userId, planId, client = prisma) {
       SET "planId" = p."id", "updatedAt" = NOW()
       FROM "Plan" AS p
       WHERE u."id" = $1
+        AND u."status" = 'ACTIVE'::"UserStatus"
         AND p."id" = $2
         AND u."storageUsed" + u."reservedUploadBytes" <= p."storageLimit"
         AND (

@@ -157,6 +157,7 @@ Completion re-reads the part set after claiming the session and asserts it compl
 - Total file size, chunk size, part count, and session lifetime are server-bounded.
 - Parallelism recommendations do not override global/route throttling.
 - PostgreSQL is the source of truth for session/quota state; Redis is not required for durability.
+- A suspended or deleted account cannot create new usage even from a request that was already in flight: session creation, part storage, completion and the one-shot commit re-check `ACTIVE` under the owner's row lock and answer `403 ACCOUNT_NOT_ACTIVE` (bytes removed, reservation returned). Abort, expiry and reservation release always work (see `docs/DEPLOYMENT.md`).
 
 ## Storage-adapter boundary
 
