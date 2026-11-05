@@ -4,7 +4,7 @@ const { requireAdmin } = require("../middleware/admin");
 const { formatBytes } = require("../lib/bytes");
 const { getStorageReport } = require("../lib/storage-report");
 const { decodeCursor, cursorWhere, cursorOrderBy, finishCursorPage } = require("../lib/pagination");
-const cache = require("../lib/cache");
+const { setAccountStatus } = require("../lib/account");
 
 const createdAtCursor = { sort: "createdAt", order: "desc", type: "date" };
 
@@ -28,10 +28,6 @@ function serializeAdminUser(user) {
       : null,
     createdAt: user.createdAt
   };
-}
-
-async function invalidateAccount(userId) {
-  await cache.del("auth-user", userId);
 }
 
 function decodeCreatedAtCursor(raw) {
@@ -120,23 +116,19 @@ async function adminRoutes(app) {
     const user = await prisma.user.findUnique({ where: { id } });
     if (!user) return reply.code(404).send({ message: "User not found" });
 
-    const updatedUser = await prisma.user.update({
-      where: { id },
-      data: { status: "SUSPENDED" },
-      select: { id: true, name: true, email: true, role: true, status: true }
-    });
+    // One statement changes the status and bumps the session version: every outstanding token
+    // is rejected on the next request on any instance (no cache to invalidate).
+    const updatedUser = await setAccountStatus(id, "SUSPENDED");
+    if (!updatedUser) return reply.code(404).send({ message: "User not found" });
 
-    await Promise.all([
-      invalidateAccount(id),
-      prisma.auditLog.create({
-        data: {
-          action: "USER_SUSPENDED",
-          details: request.body?.reason || `Suspended ${user.email}`,
-          userId: request.user.id,
-          ip: request.ip
-        }
-      })
-    ]);
+    await prisma.auditLog.create({
+      data: {
+        action: "USER_SUSPENDED",
+        details: request.body?.reason || `Suspended ${user.email}`,
+        userId: request.user.id,
+        ip: request.ip
+      }
+    });
 
     return { message: "User suspended successfully", user: updatedUser };
   });
@@ -148,23 +140,18 @@ async function adminRoutes(app) {
     const user = await prisma.user.findUnique({ where: { id: request.params.id } });
     if (!user) return reply.code(404).send({ message: "User not found" });
 
-    const updatedUser = await prisma.user.update({
-      where: { id: user.id },
-      data: { status: "ACTIVE" },
-      select: { id: true, name: true, email: true, role: true, status: true }
-    });
+    // Reactivation also bumps the session version, so tokens issued before the suspension stay dead.
+    const updatedUser = await setAccountStatus(user.id, "ACTIVE");
+    if (!updatedUser) return reply.code(404).send({ message: "User not found" });
 
-    await Promise.all([
-      invalidateAccount(user.id),
-      prisma.auditLog.create({
-        data: {
-          action: "USER_REACTIVATED",
-          details: `Reactivated ${user.email}`,
-          userId: request.user.id,
-          ip: request.ip
-        }
-      })
-    ]);
+    await prisma.auditLog.create({
+      data: {
+        action: "USER_REACTIVATED",
+        details: `Reactivated ${user.email}`,
+        userId: request.user.id,
+        ip: request.ip
+      }
+    });
 
     return { message: "User reactivated successfully", user: updatedUser };
   });
@@ -179,23 +166,17 @@ async function adminRoutes(app) {
     const user = await prisma.user.findUnique({ where: { id } });
     if (!user) return reply.code(404).send({ message: "User not found" });
 
-    const deletedUser = await prisma.user.update({
-      where: { id },
-      data: { status: "DELETED" },
-      select: { id: true, name: true, email: true, role: true, status: true }
-    });
+    const deletedUser = await setAccountStatus(id, "DELETED");
+    if (!deletedUser) return reply.code(404).send({ message: "User not found" });
 
-    await Promise.all([
-      invalidateAccount(id),
-      prisma.auditLog.create({
-        data: {
-          action: "USER_DELETED",
-          details: `Deleted ${user.email}`,
-          userId: request.user.id,
-          ip: request.ip
-        }
-      })
-    ]);
+    await prisma.auditLog.create({
+      data: {
+        action: "USER_DELETED",
+        details: `Deleted ${user.email}`,
+        userId: request.user.id,
+        ip: request.ip
+      }
+    });
 
     return { message: "User deleted successfully", user: deletedUser };
   });

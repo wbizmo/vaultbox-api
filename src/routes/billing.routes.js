@@ -1,6 +1,5 @@
 const prisma = require("../lib/prisma");
 const { requireAuth } = require("../middleware/auth");
-const cache = require("../lib/cache");
 const { verifyWebhookSignature, applyBillingEvent } = require("../lib/entitlements");
 
 async function billingRoutes(app) {
@@ -60,7 +59,6 @@ async function billingRoutes(app) {
         case "replayed":
           return { message: "Event already processed", replayed: true };
         default:
-          await cache.del("auth-user", request.body.userId);
           return { message: "Event applied", replayed: false, downgraded: result.downgraded };
       }
     });
@@ -77,7 +75,7 @@ async function billingRoutes(app) {
     const user = await prisma.$transaction(async (tx) => {
       const updated = await tx.user.update({
         where: { id: request.user.id },
-        data: { status: "SUSPENDED" },
+        data: { status: "SUSPENDED", authVersion: { increment: 1 } },
         select: { id: true, name: true, email: true, status: true }
       });
 
@@ -93,7 +91,6 @@ async function billingRoutes(app) {
       return updated;
     });
 
-    await cache.del("auth-user", user.id);
 
     return {
       message: "Payment failure simulated. Account suspended.",

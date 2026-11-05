@@ -9,6 +9,7 @@ Render tracks the repository `main` branch with auto-deploy enabled.
 The service start command is `npm start`. In v2.1.x that script deliberately performs:
 
 ```text
+prisma generate
 prisma migrate deploy
 node src/server.js
 ```
@@ -55,6 +56,24 @@ Upload/download controls can be tuned with:
 - `DOWNLOAD_MAX_RANGES`
 - `DOWNLOAD_SUGGESTED_PART_BYTES`
 
+## Account suspension and session revocation
+
+**Guarantee.** Authentication reads the account's status, role and *session version* (`User.authVersion`) from PostgreSQL on every request; nothing about authorization is cached in Redis or in process memory. Once a suspension, deletion, demotion or session revocation has committed, the **next request on every instance is rejected** — revocation latency is zero and does not depend on Redis being up. A request that had already passed authentication before the change is **not** interrupted: a long write in flight (for example an upload) can still complete. Closing that window with a commit-time account check is tracked separately (#45) and is not part of this guarantee. If the database lookup itself fails, authentication answers `503` (never `401`), so an outage cannot be mistaken for a revoked credential.
+
+**Rolling deploys and rollbacks.** The guarantee holds on an instance only while it runs this release, and for the whole fleet only once **every** instance does. During the overlap an old-build instance never reads `authVersion`: a session revoked with `revokeSessions`, or a suspension that is later reversed by reactivation, can still succeed there until the token's own JWT expiry, and a login served by an old-build instance after a version bump issues a token with no `av` claim that new instances reject with `401` (the user simply signs in again once the rollout is done). So: finish the rollout before revoking sessions or reactivating accounts. Rolling the application back to a build from before this release disables `authVersion` enforcement on those instances until they are replaced; the additive column itself is safe to leave in place. `npm start` regenerates the Prisma client before migrating, so a cached `node_modules` cannot keep a client that predates `authVersion`.
+
+**How tokens are bound.** Every JWT carries the session version it was issued under (claim `av`). Suspending, reactivating, deleting or changing the role of an account increments `authVersion` in the same statement as the change, so all tokens issued earlier are rejected — including after reactivation or demotion: affected users must sign in again. A login that races a suspension signs the version it read together with the status it checked, so the token it mints is already stale if the account changed in between. Tokens issued before this release have no claim and are treated as version 0, so existing sessions keep working until the account is revoked. JWT expiry is unchanged. Order of checks: a suspended or deleted account always gets `403 Account is suspended|deleted` (the state is checked first); `401 Session is no longer valid` applies to an *active* account whose token carries a stale session version.
+
+**Changing roles or revoking sessions by hand.** Use `src/lib/account.js` (`setAccountStatus`, `setAccountRole`, `revokeSessions`) or, in SQL, bump the version with the change so existing tokens die:
+
+```sql
+UPDATE "User" SET "role" = 'USER', "authVersion" = "authVersion" + 1 WHERE "email" = 'former-admin@example.com';
+```
+
+(A role changed without the bump still takes effect immediately, because the role is read from the database on each request, but the account's older tokens stay valid at the new privilege.)
+
+**Cost.** One primary-key lookup per authenticated request, replacing the previous 10-second Redis cache.
+
 ## Plan entitlements and billing webhook
 
 `PATCH /plans/:planId/subscribe` no longer lets any authenticated user select a paid plan. A plan with `priceMonthly > 0` is activated only when the user holds an `ACTIVE`, in-period `PlanEntitlement` for that exact plan, checked in the same SQL statement that switches the plan and verifies `storageUsed + reservedUploadBytes` fits the new limit. Free plans remain self-service.
@@ -88,12 +107,14 @@ Before this release any user could self-select the seeded Basic/Pro plans. The s
 The production database must include migrations through:
 
 ```text
-20261104240000_idempotency_keys
+20261104250000_user_auth_version
 ```
+
+(`20261104240000_idempotency_keys` and earlier migrations precede it.) `20261104250000_user_auth_version` adds one `NOT NULL DEFAULT 0` integer column to `User` (a metadata-only change in PostgreSQL 11+). Previous-build instances ignore it, so the migration is safe to apply before the new code starts.
 
 (`20261104230000_upload_reservations` and earlier migrations precede it.) `20261104240000_idempotency_keys` adds the additive `IdempotencyKey` table only.
 
-**Idempotency now lives in PostgreSQL.** Folder-creation idempotency no longer uses Redis, so Redis outages, restarts and multiple replicas cannot cause duplicate execution; Redis is used only for the auth cache and throttling. Records expire after 24 hours and are pruned by the shared 5-minute sweeper. Identical in-flight requests are serialised by a transaction-scoped advisory lock and only that wait is bounded by `IDEMPOTENCY_LOCK_TIMEOUT_MS`, so the timeout never fires because of an unrelated lock on the user row. Each process lets at most `IDEMPOTENCY_MAX_CONCURRENT` idempotent transactions hold a pooled connection; further duplicates queue in memory (holding no connection) and replay once they run, so a burst of duplicates behind a slow original cannot exhaust the Prisma pool. Keep `IDEMPOTENCY_MAX_CONCURRENT` below the pool size configured on `DATABASE_URL` (`connection_limit`, Prisma's default is `num_cpus * 2 + 1`). A committed, unexpired record is replayed with a plain read and no transaction.
+**Idempotency now lives in PostgreSQL.** Folder-creation idempotency no longer uses Redis, so Redis outages, restarts and multiple replicas cannot cause duplicate execution; Redis is used only for throttling. Records expire after 24 hours and are pruned by the shared 5-minute sweeper. Identical in-flight requests are serialised by a transaction-scoped advisory lock and only that wait is bounded by `IDEMPOTENCY_LOCK_TIMEOUT_MS`, so the timeout never fires because of an unrelated lock on the user row. Each process lets at most `IDEMPOTENCY_MAX_CONCURRENT` idempotent transactions hold a pooled connection; further duplicates queue in memory (holding no connection) and replay once they run, so a burst of duplicates behind a slow original cannot exhaust the Prisma pool. Keep `IDEMPOTENCY_MAX_CONCURRENT` below the pool size configured on `DATABASE_URL` (`connection_limit`, Prisma's default is `num_cpus * 2 + 1`). A committed, unexpired record is replayed with a plain read and no transaction.
 
 Retries made *during* a rolling deploy against an instance still on the previous build use the old per-process fallback and are not deduplicated against the new store.
 
