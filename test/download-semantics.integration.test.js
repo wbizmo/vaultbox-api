@@ -207,3 +207,38 @@ test("refusals are JSON errors with the right status and never start the session
   assert.equal((await f.app.inject({ method: "GET", url: expired.url })).statusCode, 410);
   assert.equal(await f.started(), 0);
 });
+
+test("a stream that fails to open after the existence check is a refusal, not a start (ENOENT race 404, other errors 500)", async (t) => {
+  const f = await fixture(t);
+  const session = await f.newSession();
+  const realOpen = f.storage.openReadStreamForFile.bind(f.storage);
+  let failWith = null;
+  f.storage.openReadStreamForFile = async (...args) => {
+    if (failWith) throw failWith;
+    return realOpen(...args);
+  };
+
+  // The file exists (existence check passes) but vanishes before the stream opens.
+  failWith = Object.assign(new Error("gone"), { code: "ENOENT" });
+  const raced = await f.app.inject({ method: "GET", url: session.url });
+  assert.equal(raced.statusCode, 404, raced.body);
+  assert.deepEqual(raced.json(), { message: "Stored file missing" });
+  assert.ok(!raced.headers["content-disposition"], "no download headers on an error");
+
+  // An unexpected storage failure is a JSON 500 that never leaks the cause.
+  failWith = Object.assign(new Error("disk exploded at /secret/path"), { code: "EIO" });
+  const broken = await f.app.inject({ method: "GET", url: session.url });
+  assert.equal(broken.statusCode, 500, broken.body);
+  assert.match(broken.headers["content-type"], /application\/json/);
+  assert.ok(!broken.body.includes("/secret/path"));
+
+  assert.equal((await f.state(session)).usedAt, null, "neither failure starts the session");
+  assert.equal(await f.started(), 0);
+
+  // Once storage recovers, the same session still works and starts exactly once.
+  failWith = null;
+  const ok = await f.app.inject({ method: "GET", url: session.url });
+  assert.equal(ok.statusCode, 200);
+  assert.deepEqual(ok.rawPayload, BYTES);
+  assert.equal(await f.started(), 1);
+});
