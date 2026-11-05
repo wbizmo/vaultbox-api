@@ -327,8 +327,7 @@ test("a plan change that commits after the suspension is refused (self-service a
   const response = await f.suspendWhileBlocked(() => f.app.inject({
     method: "PATCH", url: `/plans/${f.otherPlan.id}/subscribe`, headers: f.headers
   }));
-  assert.equal(response.statusCode, 403, response.body);
-  assert.match(response.json().message, /suspended/);
+  assertNotActive(response);
   assert.equal((await f.account()).planId, f.plan.id);
 
   // The SQL predicates alone (callers that bypass the route) also refuse.

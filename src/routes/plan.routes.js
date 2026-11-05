@@ -1,6 +1,7 @@
 const prisma = require("../lib/prisma");
 const { requireAuth } = require("../middleware/auth");
 const { formatBytes } = require("../lib/bytes");
+const { AppError } = require("../lib/errors");
 const { switchPlanIfFits } = require("../lib/quota");
 const { switchPlanIfEntitled, hasActiveEntitlement } = require("../lib/entitlements");
 
@@ -80,7 +81,7 @@ async function planRoutes(app) {
         select: { status: true }
       });
       if (account && account.status !== "ACTIVE") {
-        return reply.code(403).send({ message: `Account is ${account.status.toLowerCase()}` });
+        throw new AppError(403, "ACCOUNT_NOT_ACTIVE", `Account is ${String(account.status).toLowerCase()}`);
       }
 
       if (!demoMode && plan.priceMonthly > 0 && !(await hasActiveEntitlement(request.user.id, plan.id))) {
