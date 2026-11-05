@@ -4,6 +4,10 @@ All notable changes to VaultBox API are documented here.
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-11-05
+
+See [`docs/RELEASE_NOTES_v2.2.0.md`](./docs/RELEASE_NOTES_v2.2.0.md) for behavior changes, operator actions, migrations and rollback.
+
 ### Security
 
 - **Download bearer tokens can be revoked and are never exposed by the app's own telemetry (#51).** A download URL is a bearer credential, but a leaked or no-longer-wanted one could only be left to expire. New `DELETE /download-sessions/:id` (the `id` is returned by `POST /files/:id/download-token` and is not secret) and `DELETE /files/:id/download-sessions` (every active session of one of your files) revoke owner-only, idempotently and audited (`DOWNLOAD_SESSION_REVOKED`, details = session id); `revokeSessions` ("log out everywhere") now also revokes the user's unexpired download sessions in the same transaction. A revoked or expired session cannot begin a transfer (`410`, including further ranges of the same download); a stream that is already open runs to completion by design (documented, tested with a paused 32 MB transfer), and parallel ranges / `ETag` / `If-Range` are unchanged. Tests prove the raw token and its hash never appear in application logs (success, `416`, `410`, `404`, validation and storage-failure paths), audit rows or metrics, and that download responses and every refusal (live, `416`, revoked, expired, unknown and malformed token, `HEAD`) are exactly `Cache-Control: private, no-store` with `Referrer-Policy: no-referrer`. `docs/DEPLOYMENT.md` gains the token threat model, URL-exposure and edge/APM redaction requirements, safe sharing guidance and the (deferred) header-based alternative. A request authenticated just before a revocation commits cannot mint a download session after it: issuance re-checks the session version under the account row lock and answers `401 SESSION_REVOKED`. Migration `20261105200000_download_token_revocation` adds one nullable column.

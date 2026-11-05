@@ -1,6 +1,6 @@
 # VaultBox production deployment
 
-VaultBox v2.1.1 is deployed with **Render + Neon PostgreSQL + Upstash Redis**.
+VaultBox v2.2.0 targets deployment on **Render + Neon PostgreSQL + Upstash Redis**.
 
 ## Production contract
 
@@ -279,8 +279,10 @@ A future object-storage adapter can replace this provider behind the existing st
 
 ## Rollback
 
-v2.1.1 itself contained no schema change. Releases after it add only additive schema (plan entitlements, upload completion leases, upload reservations): leave those migrations in place on rollback, as older builds ignore the new tables and columns. Do **not** roll back to a build that runs Node.js `24.19.0` (it lacks the October 2026 security fixes). Roll back to a patched build instead: redeploy the previous commit with the `.node-version` pin kept at `24.22.2` or later.
+v2.1.1 itself contained no schema change. Releases after it add only additive schema (plan entitlements, upload completion leases, upload reservations, idempotency keys, account session versions, rate-limit windows, download-token revocation): leave those migrations in place on rollback, as older builds ignore the new tables and columns. Do **not** roll back to a build that runs Node.js `24.19.0` (it lacks the October 2026 security fixes). Roll back to a patched build instead: redeploy the previous commit with the `.node-version` pin kept at `24.22.2` or later.
 
 Builds that predate the plan-entitlement release do not check entitlements: rolling back to one re-enables unrestricted paid-plan self-selection. Roll back only to a build that includes entitlement checks, or keep the current release running and fix forward. The new tables are additive and safe to leave in place on rollback.
+
+Builds that predate download-token revocation (everything before v2.2.0, including v2.1.1) do not check `DownloadToken.revokedAt`: after a rollback to one, a download URL that was revoked (by the revoke endpoints or by "log out everywhere") works again until its stored `expiresAt`, and revocation stays disabled for as long as that build runs. The column and migration are harmless to leave in place. If revocation matters during an incident, fix forward instead of rolling back; if you must roll back, treat every download URL issued before the rollback as live until it expires. For a suspected leak, do not restore traffic until the latest stored expiry among the pre-rollback sessions has passed (`SELECT max("expiresAt") FROM "DownloadToken" WHERE "revokedAt" IS NOT NULL OR "expiresAt" > now();` -- the current setting is not a valid bound, since older sessions may have been issued under a longer one), or invalidate all existing tokens through a mechanism the rollback build enforces (for example by deleting the rows). Lowering `DOWNLOAD_TOKEN_EXPIRES_MINUTES` only limits URLs issued after the rollback; it does not shorten existing ones.
 
 Builds that predate upload reservations cannot reconcile `PENDING` `UploadReservation` rows, so a rollback to one can leave `reservedUploadBytes` held for uploads that were in flight or had crashed. After such a rollback, run the quota-leak query from the schema section above when no uploads are in flight and investigate any rows it returns before correcting values.
