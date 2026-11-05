@@ -27,7 +27,9 @@ async function main() {
     update: {
       role: "ADMIN",
       status: "ACTIVE",
-      planId: freePlan.id
+      planId: freePlan.id,
+      // Seeding may change role/status of an existing account: revoke its outstanding tokens too.
+      authVersion: { increment: 1 }
     },
     create: {
       name: "VaultBox Admin",
@@ -44,7 +46,9 @@ async function main() {
     update: {
       role: "USER",
       status: "ACTIVE",
-      planId: freePlan.id
+      planId: freePlan.id,
+      // Seeding may change role/status of an existing account: revoke its outstanding tokens too.
+      authVersion: { increment: 1 }
     },
     create: {
       name: "VaultBox User",
