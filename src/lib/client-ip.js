@@ -22,6 +22,21 @@ const KEYWORDS = new Set(["loopback", "linklocal", "uniquelocal"]);
 const PRODUCTION_DEFAULT = ["loopback", "linklocal", "uniquelocal"];
 const OFF_VALUES = new Set(["none", "false", "off", "0"]);
 
+// Public addresses that no sane proxy range contains. An IPv6 range that covers any of them makes ordinary
+// internet clients "trusted proxies" whose X-Forwarded-For is believed: ::ffff:0:0/96 in any spelling,
+// ::/1, ::/80 (all of the IPv4-mapped space) or a global-unicast range such as 2000::/3. Private IPv6 ranges
+// (fc00::/7, fe80::/10, ::1) contain none of them and stay valid.
+const PUBLIC_IPV4_SAMPLES = ["1.1.1.1", "8.8.8.8", "93.184.216.34", "198.51.100.1", "203.0.113.9"];
+const PUBLIC_IPV6_SAMPLES = ["2606:4700:4700::1111", "2001:4860:4860::8888", "2a00:1450:4001:81b::200e"];
+const MIN_IPV4_PREFIX = 8;
+
+function coversPublicAddress(address, prefix) {
+  const list = new net.BlockList();
+  list.addSubnet(address, prefix, "ipv6");
+  return PUBLIC_IPV4_SAMPLES.some((sample) => list.check(`::ffff:${sample}`, "ipv6"))
+    || PUBLIC_IPV6_SAMPLES.some((sample) => list.check(sample, "ipv6"));
+}
+
 function isValidAddressOrRange(token) {
   if (KEYWORDS.has(token)) return null;
   const slash = token.indexOf("/");
@@ -37,6 +52,13 @@ function isValidAddressOrRange(token) {
   const max = family === 4 ? 32 : 128;
   if (prefix > max) return `"${token}" has an out-of-range prefix length`;
   if (prefix === 0) return `"${token}" would trust every address`;
+  if (family === 4 && prefix < MIN_IPV4_PREFIX) {
+    return `"${token}" is too broad (shorter than /${MIN_IPV4_PREFIX}); a trusted proxy range must not include arbitrary internet clients`;
+  }
+  if (family === 6 && coversPublicAddress(address, prefix)) {
+    return `"${token}" covers public internet addresses (for example the IPv4-mapped ::ffff:0:0/96 range or global unicast); ` +
+      "list the actual proxy ranges (for IPv4 proxies use IPv4 ranges)";
+  }
   return null;
 }
 
@@ -65,7 +87,10 @@ function parseTrustProxy(raw, { isProduction = false } = {}) {
     };
   }
 
-  const tokens = text.split(",").map((item) => item.trim().toLowerCase()).filter(Boolean);
+  const tokens = text.split(",").map((item) => item.trim().toLowerCase());
+  if (tokens.some((token) => token === "")) {
+    return { policy: false, source: "env", error: "TRUST_PROXY contains an empty entry (stray or trailing comma); list only addresses, ranges or keywords" };
+  }
   for (const token of tokens) {
     const problem = isValidAddressOrRange(token);
     if (problem) return { policy: false, source: "env", error: `TRUST_PROXY: ${problem}` };

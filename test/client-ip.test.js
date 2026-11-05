@@ -35,6 +35,32 @@ test("TRUST_PROXY refuses values that would let a client choose its own IP", () 
   }
 });
 
+test("TRUST_PROXY refuses ranges that would make ordinary internet clients trusted proxies", () => {
+  // The IPv4-mapped range in every spelling, and IPv6 ranges that contain it: each makes every public IPv4
+  // peer a "proxy" whose X-Forwarded-For is believed (verified against Fastify while fixing review feedback).
+  for (const range of [
+    "::ffff:0:0/96", "::ffff:0.0.0.0/96", "0:0:0:0:0:ffff:0:0/96", "::FFFF:0:0/96", "::/1", "::/2", "::/64", "::/80", "2000::/3", "2000::/4", "2001:db8::/16",
+    "::ffff:8.0.0.0/104", "0.0.0.0/1", "128.0.0.0/7", "0.0.0.0/7"
+  ]) {
+    const parsed = parseTrustProxy(range, { isProduction: true });
+    assert.ok(parsed.error, `${range} must be rejected`);
+    assert.equal(parsed.policy, false);
+  }
+  // Legitimate private / documentation / provider ranges stay valid, including mapped single hosts.
+  for (const range of ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7", "2001:db8::/32", "::ffff:10.1.1.1", "::ffff:10.0.0.0/104", "203.0.113.0/24", "::/95", "fe80::/10", "fd00:1234::/32", "::1", "8000::/1"]) {
+    assert.equal(parseTrustProxy(range, { isProduction: true }).error, null, `${range} must be accepted`);
+  }
+});
+
+test("TRUST_PROXY refuses empty entries instead of silently dropping them", () => {
+  for (const value of [",", ",,", "10.0.0.0/8,", ",loopback", "loopback,,uniquelocal", " , "]) {
+    const parsed = parseTrustProxy(value, { isProduction: true });
+    assert.match(parsed.error || "", /empty entry/, JSON.stringify(value));
+    assert.equal(parsed.policy, false);
+  }
+  assert.equal(parseTrustProxy("loopback, uniquelocal", { isProduction: true }).error, null);
+});
+
 test("configuration: the setting is read from TRUST_PROXY and an invalid one stops startup", () => {
   const previous = process.env.TRUST_PROXY;
   const previousEnv = process.env.NODE_ENV;
