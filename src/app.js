@@ -41,6 +41,13 @@ function buildApp(options = {}) {
 
   app.decorate("vaultboxConfig", config);
   app.decorate("vaultboxStorage", storageAdapter);
+  // Long-running storage work (assembling an upload) is cancelled as soon as shutdown begins, so it removes
+  // its partial output and returns the upload session to a retryable state instead of being killed mid-write.
+  const shutdown = new AbortController();
+  app.decorate("vaultboxShutdownSignal", shutdown.signal);
+  app.addHook("preClose", async () => {
+    shutdown.abort();
+  });
   // Password hashing runs in a bounded worker-thread pool owned by this app (tests may inject a stand-in).
   const passwordHasher = options.passwordHasher || createPasswordHasher({
     concurrency: config.passwordHashConcurrency,

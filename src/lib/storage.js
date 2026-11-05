@@ -1,7 +1,19 @@
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
-const { once } = require("events");
+const { pipeline } = require("stream/promises");
+
+/** Resolve once the stream has closed (bounded, so a misbehaving custom writer cannot stall cleanup). */
+function whenClosed(stream, timeoutMs = 5000) {
+  if (stream.closed) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, timeoutMs);
+    stream.once("close", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
 
 class LocalStorageAdapter {
   constructor(root = path.join(process.cwd(), "storage", "uploads")) {
@@ -99,34 +111,64 @@ class LocalStorageAdapter {
     await fs.promises.rm(this.resolveUploadSession(sessionId), { recursive: true, force: true });
   }
 
-  async assembleUploadParts(sessionId, parts, finalKey) {
+  /**
+   * Final object writer for assembly. A separate method so tests can inject writers that fail,
+   * stall or close mid-write.
+   */
+  createAssemblyOutputStream(outputPath) {
+    return fs.createWriteStream(outputPath, { flags: "wx" });
+  }
+
+  /**
+   * Concatenate the parts, in the given order, into the final object while hashing (SHA-256) and
+   * counting every byte exactly once, using bounded memory.
+   *
+   * Composed with stream.pipeline so that backpressure, an error or an unexpected close on either side,
+   * and an abort `signal` all settle the returned promise promptly and tear down every stream and file
+   * descriptor involved (a hand-written write/drain loop only listened for "drain" and could wait forever
+   * on a writer that was destroyed meanwhile). On any failure the partial output is removed -- but only
+   * if this call's output stream actually opened (created) the file: ownership is tracked through the
+   * stream's "open" event, so an object that already existed ("wx" refuses it) is never deleted, even when
+   * an upstream error such as a missing part wins the race against the open error. An output stream that
+   * creates a file at `outputPath` must emit "open" once it has.
+   */
+  async assembleUploadParts(sessionId, parts, finalKey, { signal } = {}) {
     const outputPath = this.resolve(finalKey);
-    const output = fs.createWriteStream(outputPath, { flags: "wx" });
     const hash = crypto.createHash("sha256");
     let bytes = 0n;
+    const resolvePart = (storedName) => this.resolveUploadPart(sessionId, storedName);
 
-    try {
+    async function* concatenate() {
       for (const part of parts) {
-        const input = fs.createReadStream(this.resolveUploadPart(sessionId, part.storedName));
+        const input = fs.createReadStream(resolvePart(part.storedName));
         try {
           for await (const chunk of input) {
             hash.update(chunk);
             bytes += BigInt(chunk.length);
-            if (!output.write(chunk)) await once(output, "drain");
+            yield chunk;
           }
         } catch (error) {
           error.uploadPartNumber = part.partNumber;
           error.uploadPartStoredName = part.storedName;
           throw error;
+        } finally {
+          input.destroy();
         }
       }
+    }
 
-      output.end();
-      await once(output, "finish");
+    const output = this.createAssemblyOutputStream(outputPath);
+    let created = false;
+    output.once("open", () => {
+      created = true;
+    });
+
+    try {
+      await pipeline(concatenate, output, { signal });
       return { size: bytes, checksum: hash.digest("hex") };
     } catch (error) {
-      output.destroy();
-      await fs.promises.unlink(outputPath).catch(() => {});
+      await whenClosed(output); // an open that was still in flight when the pipeline failed has now resolved
+      if (created) await fs.promises.unlink(outputPath).catch(() => {});
       throw error;
     }
   }

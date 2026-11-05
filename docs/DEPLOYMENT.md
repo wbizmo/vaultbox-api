@@ -119,6 +119,16 @@ UPDATE "User" SET "role" = 'USER', "authVersion" = "authVersion" + 1 WHERE "emai
 
 **Header-based alternative (considered, deferred).** Accepting the token in an `Authorization` header would keep it out of URLs for non-browser clients, but browsers cannot send custom headers for plain downloads, parallel-range clients already work with the URL form, and a second credential channel doubles the surface to redact and test. It is intentionally not added in this release; the revocation and redaction guarantees above are the mitigation.
 
+## Storage adapters and stream lifecycle
+
+All upload, assembly and download I/O goes through the adapter injected into the app (`app.vaultboxStorage`); `src/lib/storage.js` supplies the local-disk default. Anything that implements the same interface (see `scripts/memory-storage-adapter.js` and `test/storage-adapter-contract.test.js` for a reference implementation and the behavioral contract) can replace it.
+
+**Assembling an upload** (`POST /upload-sessions/:id/complete`) concatenates the parts with `stream.pipeline`: it hashes (SHA-256) and counts each byte once, holds a bounded amount in memory, and settles promptly on any failure of either stream, removing the partial object (never one that already existed). A missing part is reported by number so the client can re-upload it.
+
+**Client disconnects.** A download whose client goes away is torn down by the HTTP layer and its read stream, and the file descriptor behind it, are closed; this is covered by a test that opens and abandons transfers and checks the process's descriptor count.
+
+**Shutdown.** On `SIGTERM`/`SIGINT` the app aborts in-flight upload assemblies at once: they clean up, the upload session returns to a retryable state and the request is answered `503` with `Retry-After: 5`. Downloads already in progress are allowed to finish until the 10-second shutdown timeout, after which the process exits and the operating system releases their descriptors.
+
 ## Audit events
 
 Each audited state change (the critical events listed below) is written **in the same PostgreSQL transaction as the change** (`src/lib/audit.js`). The two therefore always agree:
