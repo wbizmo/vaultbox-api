@@ -20,7 +20,8 @@ const prisma = require("./prisma");
  *    duplicate execution across replicas.
  *
  * A concurrent identical request waits for the first to commit and replays its result; if the wait
- * exceeds the lock timeout the caller receives IDEMPOTENCY_IN_PROGRESS (HTTP 409 + Retry-After).
+ * exceeds the lock timeout the caller receives IDEMPOTENCY_IN_PROGRESS (HTTP 409 + Retry-After). A caller
+ * that is merely queued behind OTHER requests of the same account receives IDEMPOTENCY_BUSY (HTTP 429).
  *
  * Waiting is deliberately narrow:
  *  - Same-key requests are serialised by a transaction-scoped advisory lock taken FIRST, and the lock
@@ -42,11 +43,15 @@ const prisma = require("./prisma");
  *    and its duplicates can never occupy every slot;
  *  - `maxQueuePerOwner` / `maxQueue` bound how many waiters one owner / everyone may queue;
  *  - when a slot frees, the queue is scanned in order and the first waiter whose owner is under its
- *    cap is admitted, so a blocked owner never causes head-of-line blocking for the others.
+ *    cap is admitted, so a blocked owner never causes head-of-line blocking for the others;
+ *  - a waiter that gives up is told WHY: if the owner's active holder carries the waiter's own `tag`
+ *    (same operation and key) it is waiting on an identical request (IDEMPOTENCY_IN_PROGRESS);
+ *    otherwise the account is simply busy or the queue is full (IDEMPOTENCY_BUSY).
  */
 function createGate({ concurrency = 3, perOwner = 1, maxQueue = 256, maxQueuePerOwner = 128 } = {}) {
   let active = 0;
   const activeBy = new Map();
+  const activeTags = new Map();
   const queuedBy = new Map();
   const queue = [];
 
@@ -56,15 +61,25 @@ function createGate({ concurrency = 3, perOwner = 1, maxQueue = 256, maxQueuePer
     if (value <= 0) map.delete(owner);
     else map.set(owner, value);
   };
-  const start = (owner) => {
+  const tagsOf = (owner) => activeTags.get(owner);
+  const bumpTag = (owner, tag, delta) => {
+    if (tag === null) return;
+    const tags = activeTags.get(owner) || new Map();
+    bump(tags, tag, delta);
+    if (tags.size === 0) activeTags.delete(owner);
+    else activeTags.set(owner, tags);
+  };
+  const start = (owner, tag) => {
     active += 1;
     bump(activeBy, owner, 1);
+    bumpTag(owner, tag, 1);
     let released = false;
     return () => {
       if (released) return;
       released = true;
       active -= 1;
       bump(activeBy, owner, -1);
+      bumpTag(owner, tag, -1);
       next();
     };
   };
@@ -78,7 +93,7 @@ function createGate({ concurrency = 3, perOwner = 1, maxQueue = 256, maxQueuePer
       queue.splice(index, 1);
       bump(queuedBy, waiter.owner, -1);
       clearTimeout(waiter.timer);
-      waiter.resolve(start(waiter.owner));
+      waiter.resolve(start(waiter.owner, waiter.tag));
     }
   };
 
@@ -87,20 +102,20 @@ function createGate({ concurrency = 3, perOwner = 1, maxQueue = 256, maxQueuePer
     get queued() { return queue.length; },
     activeFor: (owner) => activeBy.get(owner) || 0,
     queuedFor: (owner) => queuedBy.get(owner) || 0,
-    acquire(timeoutMs, owner = "*") {
-      if (canRun(owner)) return Promise.resolve(start(owner));
+    acquire(timeoutMs, owner = "*", tag = null) {
+      if (canRun(owner)) return Promise.resolve(start(owner, tag));
       if (queue.length >= maxQueue || (queuedBy.get(owner) || 0) >= maxQueuePerOwner) {
-        return Promise.reject(inProgressError());
+        return Promise.reject(busyError());
       }
       return new Promise((resolve, reject) => {
-        const waiter = { owner, resolve };
+        const waiter = { owner, tag, resolve };
         waiter.timer = setTimeout(() => {
           const position = queue.indexOf(waiter);
           if (position >= 0) {
             queue.splice(position, 1);
             bump(queuedBy, owner, -1);
           }
-          reject(inProgressError());
+          reject(tag !== null && tagsOf(owner)?.has(tag) ? inProgressError() : busyError());
         }, timeoutMs);
         queue.push(waiter);
         bump(queuedBy, owner, 1);
@@ -112,6 +127,12 @@ function createGate({ concurrency = 3, perOwner = 1, maxQueue = 256, maxQueuePer
 function inProgressError() {
   const error = new Error("An identical request is still in progress");
   error.code = "IDEMPOTENCY_IN_PROGRESS";
+  return error;
+}
+
+function busyError() {
+  const error = new Error("Too many concurrent idempotent requests for this account; retry shortly");
+  error.code = "IDEMPOTENCY_BUSY";
   return error;
 }
 
@@ -186,7 +207,7 @@ async function runIdempotent({
     return { replayed: true, status: known.status, body: known.response };
   }
 
-  const release = await activeGate.acquire(timeoutMs, userId);
+  const release = await activeGate.acquire(timeoutMs, userId, `${operation}|${key}`);
   try {
     return await client.$transaction(async (tx) => {
       // 1. Serialise identical requests. ONLY this wait is bounded by the lock timeout.

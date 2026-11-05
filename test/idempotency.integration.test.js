@@ -373,6 +373,20 @@ test("an unrelated lock on the User row is waited out, never reported as an in-p
   assert.equal((await f.folders(user)).length, 1);
 });
 
+/** Number of sessions waiting (not granted) on the advisory lock runIdempotent takes for exactly this identity. */
+async function waitingOnKey(userId, operation, key) {
+  const [{ waiting }] = await prisma.$queryRaw`
+    WITH k AS (SELECT hashtextextended(${`${userId}|${operation}|${key}`}, 0) AS v)
+    SELECT COUNT(*)::int AS waiting
+    FROM pg_locks, k
+    WHERE locktype = 'advisory' AND NOT granted AND objsubid = 1
+      AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+      AND classid = ((k.v >> 32) & 4294967295)::oid
+      AND objid = (k.v & 4294967295)::oid
+  `;
+  return waiting;
+}
+
 test("a burst of same-key duplicates queues in memory, holding no connection, while an original is slow", async (t) => {
   const f = await fixture(t, 1, { idempotencyLockTimeoutMs: 5000 });
   const [user] = f.users;
@@ -399,11 +413,7 @@ test("a burst of same-key duplicates queues in memory, holding no connection, wh
   // Same-user duplicates queue in the process behind the user's slot; they hold no connection.
   assert.ok(sharedGate.queuedFor(user.id) >= 10, `duplicates should be queued in memory, saw ${sharedGate.queuedFor(user.id)}`);
   assert.equal(sharedGate.activeFor(user.id), 1, "a user never holds more than one slot");
-  const [{ waiting }] = await prisma.$queryRaw`
-    SELECT COUNT(*)::int AS waiting FROM pg_locks
-    WHERE locktype = 'advisory' AND NOT granted
-      AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
-  `;
+  const waiting = await waitingOnKey(user.id, "folder.create", key);
   assert.ok(waiting <= MAX_CONCURRENT - 1, `at most ${MAX_CONCURRENT - 1} duplicates may hold a connection, saw ${waiting}`);
 
   release();
@@ -444,7 +454,7 @@ test("the concurrency gate caps active holders, queues the rest in order without
   const w1 = gate.acquire(1000).then((release) => { order.push("w1"); return release; });
   const w2 = gate.acquire(1000).then((release) => { order.push("w2"); return release; });
   assert.equal(gate.queued, 2);
-  await assert.rejects(gate.acquire(1000), (error) => error.code === "IDEMPOTENCY_IN_PROGRESS", "queue is bounded");
+  await assert.rejects(gate.acquire(1000), (error) => error.code === "IDEMPOTENCY_BUSY", "queue is bounded");
 
   r1();
   const rw1 = await w1;
@@ -461,7 +471,7 @@ test("the concurrency gate caps active holders, queues the rest in order without
   // A waiter that is not served in time gives up with the documented in-progress error.
   const slow = createGate({ concurrency: 1, perOwner: 1, maxQueue: 5 });
   const held = await slow.acquire(1000);
-  await assert.rejects(slow.acquire(60), (error) => error.code === "IDEMPOTENCY_IN_PROGRESS");
+  await assert.rejects(slow.acquire(60), (error) => error.code === "IDEMPOTENCY_BUSY");
   assert.equal(slow.queued, 0, "the timed-out waiter left the queue");
   held();
   const again = await slow.acquire(1000);
@@ -515,7 +525,7 @@ test("the gate is per-owner fair: no head-of-line blocking, per-owner caps and q
   const a2 = gate.acquire(1000, "A").then((release) => { order.push("A2"); return release; });
   const a3 = gate.acquire(1000, "A").then((release) => { order.push("A3"); return release; });
   assert.equal(gate.queuedFor("A"), 2);
-  await assert.rejects(gate.acquire(1000, "A"), (error) => error.code === "IDEMPOTENCY_IN_PROGRESS", "per-owner queue is bounded");
+  await assert.rejects(gate.acquire(1000, "A"), (error) => error.code === "IDEMPOTENCY_BUSY", "per-owner queue is bounded");
 
   // Others are admitted at once even though A's waiters are ahead of them in the queue.
   const b = await gate.acquire(1000, "B");
@@ -589,11 +599,7 @@ test("an identical request from ANOTHER PROCESS waits on the advisory lock, then
   });
   const waiting = request();
   await new Promise((resolve) => setTimeout(resolve, 250));
-  const [{ pending }] = await prisma.$queryRaw`
-    SELECT COUNT(*)::int AS pending FROM pg_locks
-    WHERE locktype = 'advisory' AND NOT granted
-      AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
-  `;
+  const pending = await waitingOnKey(user.id, "folder.create", key);
   assert.ok(pending >= 1, "the other process's duplicate is genuinely waiting on the advisory lock");
 
   const timedOut = await waiting;
@@ -606,4 +612,55 @@ test("an identical request from ANOTHER PROCESS waits on the advisory lock, then
   assert.equal(replay.status, 201);
   assert.equal((await replay.json()).folder.id, done.body.folder.id);
   assert.equal((await f.folders(user)).length, 1);
+});
+
+test("a gate timeout says WHY: 409 only when an identical request is the holder, otherwise a distinct busy error", async () => {
+  const gate = createGate({ concurrency: 3, perOwner: 1 });
+  const held = await gate.acquire(1000, "A", "folder.create|k1");
+
+  // Same operation and key as the holder: an identical request really is in flight.
+  await assert.rejects(gate.acquire(50, "A", "folder.create|k1"), (error) => error.code === "IDEMPOTENCY_IN_PROGRESS");
+  // Different key (or no tag): the account is merely busy; there is no identical request.
+  await assert.rejects(gate.acquire(50, "A", "folder.create|k2"), (error) => error.code === "IDEMPOTENCY_BUSY");
+  await assert.rejects(gate.acquire(50, "A"), (error) => error.code === "IDEMPOTENCY_BUSY");
+  assert.equal(gate.queuedFor("A"), 0, "timed-out waiters leave the queue");
+
+  held();
+  // The holder's tag is forgotten once it releases.
+  const next = await gate.acquire(1000, "A", "folder.create|k2");
+  await assert.rejects(gate.acquire(50, "A", "folder.create|k1"), (error) => error.code === "IDEMPOTENCY_BUSY");
+  next();
+});
+
+test("a different key from a busy account gets 429 Retry-After, never the identical-request 409", async (t) => {
+  const f = await fixture(t, 1);
+  const [user] = f.users;
+
+  let release;
+  const hold = new Promise((resolve) => { release = resolve; });
+  let claimed;
+  const claimedSignal = new Promise((resolve) => { claimed = resolve; });
+  const owner = runIdempotent({
+    userId: user.id, operation: "folder.create", key: "slow-one", payload: { name: "slow" },
+    execute: async (tx) => {
+      const folder = await tx.folder.create({ data: { name: "slow", userId: user.id } });
+      claimed();
+      await hold;
+      return { status: 201, body: { message: "Folder created successfully", folder } };
+    }
+  });
+  await claimedSignal;
+
+  const other = await f.create(user, "other", "a-different-key");
+  assert.equal(other.statusCode, 429, other.body);
+  assert.equal(other.headers["retry-after"], "1");
+  assert.doesNotMatch(other.body, /identical/);
+
+  const identical = await f.create(user, "slow", "slow-one");
+  assert.equal(identical.statusCode, 409, identical.body);
+  assert.equal(identical.headers["retry-after"], "1");
+
+  release();
+  await owner;
+  assert.equal((await f.create(user, "other", "a-different-key")).statusCode, 201, "once free, the other key proceeds");
 });
