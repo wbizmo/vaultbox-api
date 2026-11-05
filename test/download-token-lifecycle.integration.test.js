@@ -224,17 +224,29 @@ test("parallel ranges and ETag handling are unchanged for a live session", async
   assert.equal(ifRange.statusCode, 206);
 });
 
-test("download responses and refusals are never cached and never leak a referrer", async (t) => {
+test("download responses and every refusal are exactly no-store and never leak a referrer", async (t) => {
   const f = await fixture(t);
   const session = await f.issue(f.alice, f.aliceFile);
-  const live = await f.app.inject({ method: "GET", url: session.url });
-  assert.equal(live.headers["cache-control"], "private, no-store");
-  assert.equal(live.headers["referrer-policy"], "no-referrer");
-  await f.revoke(f.alice, session);
-  for (const url of [session.url, `/download/${"z".repeat(43)}`]) {
-    const refused = await f.app.inject({ method: "GET", url });
-    assert.equal(refused.headers["referrer-policy"], "no-referrer");
-    assert.ok(!/public|max-age=[1-9]/.test(refused.headers["cache-control"] || ""), "refusals are not publicly cacheable");
+  const expired = await f.issue(f.alice, f.aliceFile2);
+  await prisma.downloadToken.update({ where: { id: expired.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+  const revoked = await f.issue(f.alice, f.aliceFile);
+  await f.revoke(f.alice, revoked);
+
+  const cases = [
+    ["live GET", { method: "GET", url: session.url }, 200],
+    ["live HEAD", { method: "HEAD", url: session.url }, 200],
+    ["unsatisfiable range", { method: "GET", url: session.url, headers: { range: "bytes=999-1000" } }, 416],
+    ["revoked", { method: "GET", url: revoked.url }, 410],
+    ["revoked HEAD", { method: "HEAD", url: revoked.url }, 410],
+    ["expired", { method: "GET", url: expired.url }, 410],
+    ["unknown token", { method: "GET", url: `/download/${"z".repeat(43)}` }, 404],
+    ["malformed (too short) token", { method: "GET", url: "/download/short" }, 400]
+  ];
+  for (const [label, request, status] of cases) {
+    const res = await f.app.inject(request);
+    assert.equal(res.statusCode, status, label);
+    assert.equal(res.headers["cache-control"], "private, no-store", `${label}: cache-control`);
+    assert.equal(res.headers["referrer-policy"], "no-referrer", `${label}: referrer-policy`);
   }
 });
 
@@ -290,7 +302,17 @@ test("a request authenticated before \"log out everywhere\" cannot mint a downlo
   await lockTaken;
 
   const pending = f.app.inject({ method: "POST", url: `/files/${f.aliceFile.id}/download-token`, headers });
-  await new Promise((resolve) => setTimeout(resolve, 500)); // let it reach the lock wait
+  // Barrier: wait until the issuance transaction is actually blocked on the account row lock (so it has passed
+  // authentication with the old session version) instead of sleeping and hoping.
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const waiting = await prisma.$queryRaw`
+      SELECT count(*)::int AS n FROM pg_stat_activity
+      WHERE wait_event_type = 'Lock' AND query ILIKE '%FOR SHARE%' AND query LIKE '%"User"%'`;
+    if (waiting[0].n > 0) break;
+    assert.ok(Date.now() < deadline, "issuance never reached the account lock");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
   release();
   await revoker;
 

@@ -16,6 +16,13 @@ const tokenThrottle = throttlePreHandler(
   (request) => request.user?.id || clientIp(request)
 );
 
+// Every response from a bearer-token route -- downloads and every refusal (unknown, expired, revoked, malformed token,
+// unsatisfiable range) -- must be uncacheable. Set in onRequest so it is present before validation can reply.
+function noStore(request, reply, done) {
+  reply.header("Cache-Control", "private, no-store");
+  done();
+}
+
 async function loadDownloadRecord(rawToken) {
   return prisma.downloadToken.findUnique({
     where: { token: hashDownloadToken(rawToken) },
@@ -279,6 +286,7 @@ async function downloadRoutes(app) {
   });
 
   app.get("/download/:token", {
+    onRequest: noStore,
     schema: {
       tags: ["Downloads"],
       summary: "Download or resume a file with an optional byte range",
@@ -291,6 +299,7 @@ async function downloadRoutes(app) {
   }, async (request, reply) => serveDownload(request, reply, false));
 
   app.head("/download/:token", {
+    onRequest: noStore,
     schema: {
       tags: ["Downloads"],
       summary: "Inspect download metadata without transferring bytes"
