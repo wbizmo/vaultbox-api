@@ -60,6 +60,10 @@ function getConfig() {
       min: 2,
       max: 3600
     }),
+    // Password hashing budget (see lib/password-hasher.js): worker threads, queue length, max queue wait.
+    passwordHashConcurrency: parseInteger(process.env.PASSWORD_HASH_CONCURRENCY, 2, { min: 1, max: 16 }),
+    passwordHashQueue: parseInteger(process.env.PASSWORD_HASH_QUEUE, 64, { min: 0, max: 10000 }),
+    passwordHashWaitMs: parseInteger(process.env.PASSWORD_HASH_WAIT_MS, 5000, { min: 100, max: 60000 }),
     idempotencyLockTimeoutMs: parseInteger(process.env.IDEMPOTENCY_LOCK_TIMEOUT_MS, 5000, {
       min: 100,
       max: 60000

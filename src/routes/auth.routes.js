@@ -1,4 +1,4 @@
-const bcrypt = require("bcryptjs");
+const { DUMMY_HASH } = require("../lib/password-hasher");
 const { clientIp } = require("../lib/client-ip");
 const { recordAudit } = require("../lib/audit");
 const prisma = require("../lib/prisma");
@@ -24,6 +24,13 @@ const loginAddressThrottle = throttlePreHandler(
   { limit: 120, windowSeconds: 300, policy: "shared" },
   (request) => clientIp(request)
 );
+
+/** 503 for "the hashing budget is exhausted": distinct from a credential failure, never a login attempt. */
+function busyReply(reply, request, error) {
+  request.log.warn({ event: "password_hash_busy", reason: error.reason }, "Password hashing budget exhausted");
+  reply.header("Retry-After", error.retryAfterSeconds || 2);
+  return reply.code(503).send({ message: "Authentication is busy; retry shortly" });
+}
 
 function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
@@ -88,7 +95,13 @@ async function authRoutes(app) {
     if (existingUser) return reply.code(409).send({ message: "Email already registered" });
 
     const freePlan = await prisma.plan.findUnique({ where: { name: "Free" } });
-    const hashedPassword = await bcrypt.hash(password, 12);
+    let hashedPassword;
+    try {
+      hashedPassword = await app.passwordHasher.hash(password);
+    } catch (error) {
+      if (error.code === "PASSWORD_VERIFICATION_BUSY") return busyReply(reply, request, error);
+      throw error;
+    }
 
     let user;
     try {
@@ -137,13 +150,22 @@ async function authRoutes(app) {
     const email = normalizeEmail(request.body.email);
     const user = await prisma.user.findUnique({ where: { email }, include: { plan: true } });
 
-    if (!user) return reply.code(401).send({ message: "Invalid email or password" });
+    // Every attempt performs exactly one comparison at the production cost -- against a dummy hash when the
+    // account does not exist -- and every failure looks the same, so neither the response nor the time
+    // reveals whether an e-mail address is registered or what state the account is in.
+    let passwordMatches;
+    try {
+      passwordMatches = await app.passwordHasher.compare(request.body.password, user ? user.password : DUMMY_HASH);
+    } catch (error) {
+      if (error.code === "PASSWORD_VERIFICATION_BUSY") return busyReply(reply, request, error);
+      throw error;
+    }
+    if (!user || !passwordMatches) return reply.code(401).send({ message: "Invalid email or password" });
+
+    // Only a caller who proved the password learns the account state (they need it to act on it).
     if (user.status !== "ACTIVE") {
       return reply.code(403).send({ message: `Account is ${user.status.toLowerCase()}` });
     }
-
-    const passwordMatches = await bcrypt.compare(request.body.password, user.password);
-    if (!passwordMatches) return reply.code(401).send({ message: "Invalid email or password" });
 
     // Critical but not a state change: it is written before any token exists, so if it fails the caller
     // gets an error and no credential was issued (an accurate, retryable outcome).

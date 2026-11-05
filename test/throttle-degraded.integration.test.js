@@ -19,7 +19,7 @@ const { checkThrottle, getThrottleState, pruneExpiredRateLimitWindows } = requir
 
 const JWT_SECRET = "throttle-degraded-secret-long-enough-for-tests";
 const unique = () => crypto.randomUUID().slice(0, 12);
-const { freshAddress } = require("../scripts/test-address");
+const { freshAddress } = require("../scripts/fresh-address");
 
 function startWorker(t, env) {
   const worker = fork(path.join(__dirname, "..", "scripts", "app-worker.js"), [], {
@@ -198,7 +198,10 @@ test("shared counter: concurrent callers admit exactly `limit`, windows roll ove
 });
 
 test("login has independent global caps: one account from many addresses, and one address across many accounts", async (t) => {
-  const app = buildApp({ logger: false, config: { nodeEnv: "test", isProduction: false, corsOrigins: [], jwtSecret: JWT_SECRET, jwtExpiresIn: "1h" } });
+  // This test is about the limits, not about hashing: a stand-in hasher keeps 160 failed logins fast
+  // (real cost-12 comparisons would take ~30 s of CPU here).
+  const passwordHasher = { compare: async () => false, hash: async () => "x", stats: () => ({}) };
+  const app = buildApp({ logger: false, passwordHasher, config: { nodeEnv: "test", isProduction: false, corsOrigins: [], jwtSecret: JWT_SECRET, jwtExpiresIn: "1h" } });
   await app.ready();
   t.after(() => app.close());
   const attempt = (email, remoteAddress) => app.inject({
