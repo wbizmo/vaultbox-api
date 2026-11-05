@@ -23,6 +23,12 @@ enum FileStatus {
   DELETED
 }
 
+enum FileDeletionStatus {
+  PENDING
+  DONE
+  DEAD
+}
+
 enum EntitlementStatus {
   ACTIVE
   REVOKED
@@ -277,4 +283,27 @@ model RateLimitWindow {
   expiresAt DateTime
 
   @@index([expiresAt])
+}
+
+// Durable outbox for physical byte removal. One row per logically deleted file, inserted in the same
+// statement that marks the File DELETED and refunds quota, so the two can never disagree. A worker
+// claims rows under a lease (FOR UPDATE SKIP LOCKED), removes the bytes (a missing object counts as
+// success), and retries with backoff until DONE or, after too many attempts, DEAD. Deliberately has no
+// foreign keys: it is a self-contained job record that outlives the rows it was created from.
+model FileDeletion {
+  id            String             @id @default(dbgenerated("(gen_random_uuid())::text"))
+  fileId        String             @unique
+  userId        String
+  storedName    String
+  size          BigInt
+  status        FileDeletionStatus @default(PENDING)
+  attempts      Int                @default(0)
+  nextAttemptAt DateTime           @default(now())
+  lockedUntil   DateTime?
+  lastError     String?
+  createdAt     DateTime           @default(now())
+  completedAt   DateTime?
+
+  @@index([status, nextAttemptAt])
+  @@index([userId])
 }
