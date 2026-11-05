@@ -88,6 +88,14 @@ UPDATE "User" SET "role" = 'USER', "authVersion" = "authVersion" + 1 WHERE "emai
 
 **Cost.** One primary-key lookup per authenticated request, replacing the previous 10-second Redis cache.
 
+## Download sessions
+
+`POST /files/:id/download-token` creates a short-lived, reusable download session; `GET`/`HEAD /download/:token` serve it, with `Range`, `If-Range` and strong `ETag` support so clients can fetch parts in parallel.
+
+**What "started" means.** A session *starts* when a `GET` has successfully opened the file's stream (this sets `usedAt` and emits `DOWNLOAD_SESSION_STARTED`, atomically and exactly once even when several first range requests arrive together). **`HEAD` is metadata inspection and never starts a session**: it leaves `usedAt` unset, emits nothing, and a later real `GET` is still the first start. A request that fails before a stream exists (unknown or expired token, inactive account or file, unsatisfiable range, bytes missing from storage) is a JSON error and records nothing. The event is written when the stream is opened, before the bytes are sent; a connection that drops mid-transfer is still a start. A separate "inspected" event for `HEAD` is deliberately not recorded: it has no operational use and would add a write to every metadata probe.
+
+**Errors.** Refusals are decided before any download header is set: `404` (unknown token, missing file or bytes), `410` (expired), `403` (inactive account), `416` + `Content-Range: bytes */<size>` (unsatisfiable range).
+
 ## Audit events
 
 Each audited state change (the critical events listed below) is written **in the same PostgreSQL transaction as the change** (`src/lib/audit.js`). The two therefore always agree:

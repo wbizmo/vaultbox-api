@@ -276,22 +276,14 @@ test("resumable upload: create, complete and abort each commit atomically with t
 
 test("first download: the started flag and its event cannot disagree", async (t) => {
   const f = await fixture(t);
-  // The download routes still read through the process-wide storage adapter (a single injected adapter is
-  // tracked in #56), so point that adapter at this test's directory for the duration of the test.
-  const { storage: sharedStorage } = require("../src/lib/storage");
-  const original = { root: sharedStorage.root, partsRoot: sharedStorage.partsRoot };
-  sharedStorage.root = f.storage.root;
-  sharedStorage.partsRoot = f.storage.partsRoot;
-  t.after(() => Object.assign(sharedStorage, original));
   // Track every read stream the routes open, to prove none is left open when recording the event fails.
   const opened = [];
-  const openRead = sharedStorage.openReadStreamForFile.bind(sharedStorage);
-  sharedStorage.openReadStreamForFile = async (...args) => {
+  const openRead = f.storage.openReadStreamForFile.bind(f.storage);
+  f.storage.openReadStreamForFile = async (...args) => {
     const stream = await openRead(...args);
     opened.push(stream);
     return stream;
   };
-  t.after(() => { delete sharedStorage.openReadStreamForFile; });
   const ok = await f.upload(Buffer.from("abcdefgh"), "dl-secret.bin");
   const fileId = ok.json().file.id;
   const token = await f.app.inject({ method: "POST", url: `/files/${fileId}/download-token`, headers: f.bearer(f.user) });
