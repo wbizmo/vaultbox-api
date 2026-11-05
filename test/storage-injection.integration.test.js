@@ -227,7 +227,10 @@ test("shutdown cancels an in-flight assembly: 503 + Retry-After, no object left,
       return new Writable({
         highWaterMark: 4,
         construct(callback) {
-          real.once("open", () => callback());
+          real.once("open", () => {
+            this.emit("open"); // the adapter contract: a writer that creates the file announces it
+            callback();
+          });
           real.once("error", callback);
         },
         write() {

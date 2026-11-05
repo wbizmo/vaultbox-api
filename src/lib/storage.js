@@ -3,6 +3,18 @@ const fs = require("fs");
 const path = require("path");
 const { pipeline } = require("stream/promises");
 
+/** Resolve once the stream has closed (bounded, so a misbehaving custom writer cannot stall cleanup). */
+function whenClosed(stream, timeoutMs = 5000) {
+  if (stream.closed) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, timeoutMs);
+    stream.once("close", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
 class LocalStorageAdapter {
   constructor(root = path.join(process.cwd(), "storage", "uploads")) {
     this.root = path.resolve(root);
@@ -114,8 +126,11 @@ class LocalStorageAdapter {
    * Composed with stream.pipeline so that backpressure, an error or an unexpected close on either side,
    * and an abort `signal` all settle the returned promise promptly and tear down every stream and file
    * descriptor involved (a hand-written write/drain loop only listened for "drain" and could wait forever
-   * on a writer that was destroyed meanwhile). On any failure the partial output is removed, unless it was
-   * never ours to begin with (EEXIST on open).
+   * on a writer that was destroyed meanwhile). On any failure the partial output is removed -- but only
+   * if this call's output stream actually opened (created) the file: ownership is tracked through the
+   * stream's "open" event, so an object that already existed ("wx" refuses it) is never deleted, even when
+   * an upstream error such as a missing part wins the race against the open error. An output stream that
+   * creates a file at `outputPath` must emit "open" once it has.
    */
   async assembleUploadParts(sessionId, parts, finalKey, { signal } = {}) {
     const outputPath = this.resolve(finalKey);
@@ -142,13 +157,18 @@ class LocalStorageAdapter {
       }
     }
 
+    const output = this.createAssemblyOutputStream(outputPath);
+    let created = false;
+    output.once("open", () => {
+      created = true;
+    });
+
     try {
-      await pipeline(concatenate, this.createAssemblyOutputStream(outputPath), { signal });
+      await pipeline(concatenate, output, { signal });
       return { size: bytes, checksum: hash.digest("hex") };
     } catch (error) {
-      if (!(error.code === "EEXIST" && error.syscall === "open")) {
-        await fs.promises.unlink(outputPath).catch(() => {});
-      }
+      await whenClosed(output); // an open that was still in flight when the pipeline failed has now resolved
+      if (created) await fs.promises.unlink(outputPath).catch(() => {});
       throw error;
     }
   }

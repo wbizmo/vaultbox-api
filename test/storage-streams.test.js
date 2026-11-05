@@ -172,6 +172,21 @@ test("assembly refuses to touch an object that already exists (and keeps it)", a
   assert.equal(fs.readFileSync(f.adapter.resolve(f.finalKey), "utf8"), "someone else's object");
 });
 
+test("an upstream error that masks the open error never deletes an object that already existed", async (t) => {
+  const f = await fixture(t);
+  fs.writeFileSync(f.adapter.resolve(f.finalKey), "someone else's object");
+  fs.rmSync(f.adapter.resolveUploadPart(f.sessionId, "part-0")); // the first part is missing: ENOENT races EEXIST
+  const outcome = await settled(f.adapter.assembleUploadParts(f.sessionId, f.parts, f.finalKey));
+  assert.ok(["ENOENT", "EEXIST"].includes(outcome.error?.code), `settled with ${outcome.error?.code}`);
+  assert.equal(fs.readFileSync(f.adapter.resolve(f.finalKey), "utf8"), "someone else's object");
+
+  // The same race with the object absent: it is ours, so it is removed.
+  fs.rmSync(f.adapter.resolve(f.finalKey));
+  const ours = await settled(f.adapter.assembleUploadParts(f.sessionId, f.parts, f.finalKey));
+  assert.equal(ours.error?.code, "ENOENT");
+  assert.ok(!fs.existsSync(f.adapter.resolve(f.finalKey)));
+});
+
 test("many concurrent failing assemblies neither hang nor leak descriptors or output files", linuxOnly, async (t) => {
   const kinds = [
     writerThat((writer) => setTimeout(() => writer.destroy(new Error("boom")), 5)),
