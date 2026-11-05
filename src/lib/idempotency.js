@@ -28,46 +28,82 @@ const prisma = require("./prisma");
  *    identical request is still running" -- never a wait on the User row that the claim's and the
  *    folder's foreign-key checks may take behind unrelated quota transactions.
  *  - A bounded in-process gate limits how many idempotent transactions may hold a pooled connection
- *    at once; further callers queue in memory (no connection held) and replay as soon as they run.
+ *    at once, and at most ONE per user, so one user's stalled request and its duplicates can never
+ *    starve other users; further callers queue in memory (no connection held) and replay as soon as
+ *    they run.
  *  - A committed, unexpired record is replayed by a plain read without opening a transaction.
  */
 
-/** Bounded concurrency gate: waiters queue in memory and hold no database connection. */
-function createGate({ concurrency = 3, maxQueue = 256 } = {}) {
+/**
+ * Bounded, per-owner-fair concurrency gate. Waiters queue in memory and hold no database connection.
+ *
+ *  - `concurrency` caps how many holders are active process-wide (protects the connection pool);
+ *  - `perOwner` caps how many of those one owner (user) may hold, so a single user's stalled request
+ *    and its duplicates can never occupy every slot;
+ *  - `maxQueuePerOwner` / `maxQueue` bound how many waiters one owner / everyone may queue;
+ *  - when a slot frees, the queue is scanned in order and the first waiter whose owner is under its
+ *    cap is admitted, so a blocked owner never causes head-of-line blocking for the others.
+ */
+function createGate({ concurrency = 3, perOwner = 1, maxQueue = 256, maxQueuePerOwner = 128 } = {}) {
   let active = 0;
+  const activeBy = new Map();
+  const queuedBy = new Map();
   const queue = [];
+
+  const canRun = (owner) => active < concurrency && (activeBy.get(owner) || 0) < perOwner;
+  const bump = (map, owner, delta) => {
+    const value = (map.get(owner) || 0) + delta;
+    if (value <= 0) map.delete(owner);
+    else map.set(owner, value);
+  };
+  const start = (owner) => {
+    active += 1;
+    bump(activeBy, owner, 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      active -= 1;
+      bump(activeBy, owner, -1);
+      next();
+    };
+  };
   const next = () => {
-    while (active < concurrency && queue.length > 0) {
-      const waiter = queue.shift();
+    for (let index = 0; index < queue.length && active < concurrency;) {
+      const waiter = queue[index];
+      if (!canRun(waiter.owner)) {
+        index += 1;
+        continue;
+      }
+      queue.splice(index, 1);
+      bump(queuedBy, waiter.owner, -1);
       clearTimeout(waiter.timer);
-      active += 1;
-      waiter.resolve(() => {
-        active -= 1;
-        next();
-      });
+      waiter.resolve(start(waiter.owner));
     }
   };
+
   return {
     get active() { return active; },
     get queued() { return queue.length; },
-    acquire(timeoutMs) {
-      if (active < concurrency && queue.length === 0) {
-        active += 1;
-        return Promise.resolve(() => {
-          active -= 1;
-          next();
-        });
+    activeFor: (owner) => activeBy.get(owner) || 0,
+    queuedFor: (owner) => queuedBy.get(owner) || 0,
+    acquire(timeoutMs, owner = "*") {
+      if (canRun(owner)) return Promise.resolve(start(owner));
+      if (queue.length >= maxQueue || (queuedBy.get(owner) || 0) >= maxQueuePerOwner) {
+        return Promise.reject(inProgressError());
       }
-      if (queue.length >= maxQueue) return Promise.reject(inProgressError());
       return new Promise((resolve, reject) => {
-        const waiter = { resolve };
+        const waiter = { owner, resolve };
         waiter.timer = setTimeout(() => {
-          const index = queue.indexOf(waiter);
-          if (index >= 0) queue.splice(index, 1);
+          const position = queue.indexOf(waiter);
+          if (position >= 0) {
+            queue.splice(position, 1);
+            bump(queuedBy, owner, -1);
+          }
           reject(inProgressError());
         }, timeoutMs);
-        waiter.timer.unref?.();
         queue.push(waiter);
+        bump(queuedBy, owner, 1);
       });
     }
   };
@@ -80,7 +116,7 @@ function inProgressError() {
 }
 
 const MAX_CONCURRENT = Math.max(1, Number.parseInt(process.env.IDEMPOTENCY_MAX_CONCURRENT || "", 10) || 3);
-const gate = createGate({ concurrency: MAX_CONCURRENT });
+const gate = createGate({ concurrency: MAX_CONCURRENT, perOwner: 1 });
 
 const KEY_PATTERN = /^[A-Za-z0-9._:~-]{1,128}$/;
 const DEFAULT_TTL_SECONDS = 24 * 60 * 60;
@@ -150,7 +186,7 @@ async function runIdempotent({
     return { replayed: true, status: known.status, body: known.response };
   }
 
-  const release = await activeGate.acquire(timeoutMs);
+  const release = await activeGate.acquire(timeoutMs, userId);
   try {
     return await client.$transaction(async (tx) => {
       // 1. Serialise identical requests. ONLY this wait is bounded by the lock timeout.
@@ -221,6 +257,7 @@ module.exports = {
   KEY_PATTERN,
   createGate,
   MAX_CONCURRENT,
+  gate,
   fingerprint,
   validateIdempotencyKey,
   runIdempotent,

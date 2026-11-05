@@ -27,7 +27,7 @@ const app = buildApp({
     uploadSuggestedParallelParts: 4,
     uploadCompletionLeaseSeconds: 30,
     uploadReservationLeaseSeconds: 30,
-    idempotencyLockTimeoutMs: 5000,
+    idempotencyLockTimeoutMs: Number(process.env.WORKER_IDEMPOTENCY_LOCK_TIMEOUT_MS) || 5000,
     downloadTokenExpiresMinutes: 10,
     downloadSuggestedPartBytes: 1024,
     downloadMaxRanges: 4
