@@ -125,6 +125,25 @@ Rate limits, audit-log addresses and request logs all use **one** derived identi
 
 `socketAddress`, `forwardedFor` and `chain` in the same response show exactly what was seen. A production start without `TRUST_PROXY` logs a warning pointing to this check. Until the check is done, the per-address login cap (120 / 5 min) may be shared by users behind the same resolved address.
 
+## Authentication under abuse
+
+**Uniform failure.** `POST /auth/login` answers every failure with the same `401 {"message":"Invalid email or password"}`: unknown e-mail address, wrong password, and a suspended or deleted account whose password was *not* supplied correctly. Every attempt performs exactly **one** bcrypt comparison at the production cost (12) — unknown accounts are compared against a fixed dummy hash — so neither the response nor the time says whether an address is registered or in what state. Only a caller who supplies the **correct** password is told `403 Account is suspended|deleted`, because they need that to act on it. (Registration still answers `409 Email already registered`, which is inherent to sign-up; its volume is limited by the per-address guard. Accounts whose hash was created at a lower cost than 12 — for example demo accounts seeded by older builds — finish faster than the dummy; re-seed or have users reset to equalise.)
+
+**Layered limits** (all coordinated across replicas, see [Rate limiting](#rate-limiting-and-redis-outages)): per address and account pair (10 / 5 min), per account across all addresses (30 / 15 min), per address across all accounts (120 / 5 min). They run **before** any hashing, so a refused attempt costs no CPU.
+
+**Hashing budget.** bcryptjs is pure JavaScript. Measured on this codebase (cost 12, 4 vCPU, Node 24.22.2; reproduce with `node scripts/measure-password-hashing.js`):
+
+| 32 concurrent failed logins | wall time | event-loop delay (max) |
+| --- | ---: | ---: |
+| in-process (previous behaviour) | 10.9 s | **3,233 ms** |
+| 2 worker threads (now) | 5.5 s | **12 ms** |
+
+(8 concurrent in-process: 808 ms of loop delay; one comparison takes ~330 ms.) Login and registration therefore hash in a bounded pool of worker threads (`PASSWORD_HASH_CONCURRENCY`, default 2, workers created on first use). At most `PASSWORD_HASH_QUEUE` (default 64) requests wait for a worker and none waits longer than `PASSWORD_HASH_WAIT_MS` (default 5000); beyond that the request is refused immediately with **`503` + `Retry-After`** (never a credential failure, never counted as a login), so a burst is shed instead of stalling every other request. **Documented budget:** the event loop is never blocked for more than a few milliseconds by hashing (a test fails above 500 ms); worst-case added latency for a queued login is `PASSWORD_HASH_WAIT_MS`, and sustained throughput is about `PASSWORD_HASH_CONCURRENCY × 3` logins per second. Size `PASSWORD_HASH_CONCURRENCY` to the CPUs you can spare (each worker saturates one core while hashing). The stored hash format is unchanged (bcrypt), so there is **no migration** and older hashes keep working.
+
+*Assessed, not adopted:* `crypto.scrypt` (Node's built-in, thread-pool based) is as fast off-loop but needs a hash-format migration (verify bcrypt, re-hash on login) and a second verifier for a rollback window; Argon2id needs a native dependency. Neither is justified while the pool keeps the loop responsive; revisit if hashing capacity becomes the bottleneck.
+
+**Metrics.** The admin-only `GET /metrics` reports `passwordHashing` (concurrency, active, queued, completed, `rejectedQueueFull`, `rejectedWaitTimeout`, `workerFailures`) — counters and gauges only. A refused attempt logs `password_hash_busy` with the reason and nothing else. No password, e-mail address, token or client address is logged, and rate-limit keys (Redis and PostgreSQL) hold only a SHA-256 digest of namespace and identity. Alert on a non-zero rate of `rejectedQueueFull` **or** `rejectedWaitTimeout`: with the defaults sustained overload shows up first as wait-timeout refusals, because two workers finish only about 30 logins within the 5 s wait limit while the queue holds 64. Setting `PASSWORD_HASH_QUEUE` far above `PASSWORD_HASH_CONCURRENCY × 3 × PASSWORD_HASH_WAIT_MS / 1000` therefore mostly adds requests that will time out; keep it near that figure.
+
 ## Rate limiting and Redis outages
 
 Throttling is a fixed window per route class. **Healthy:** one atomic Redis Lua round trip decides, so a limit is global across replicas (it is not multiplied by the replica count).

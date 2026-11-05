@@ -1,5 +1,5 @@
 const test = require("node:test");
-const { freshAddress } = require("../scripts/test-address");
+const { freshAddress } = require("../scripts/fresh-address");
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const { fork } = require("node:child_process");
@@ -100,7 +100,7 @@ async function fixture(t, { withWorker = false } = {}) {
     return { status: res.status, statusCode: res.status, json, body: text };
   };
   const viaA = (url, token, options = {}) => app.inject({ url, headers: token ? bearer(token) : {}, ...options });
-  // Minted directly (no bcrypt) so tests that gate bcrypt.compare can still act as the admin.
+  // Minted directly (no password check) so tests that gate password verification can still act as the admin.
   const adminToken = async () => app.jwt.sign({ id: admin.id, av: (await prisma.user.findUnique({ where: { id: admin.id } })).authVersion });
   const suspend = async (user) => {
     const res = await viaA(`/admin/users/${user.id}/suspend`, await adminToken(), { method: "PATCH" });
@@ -170,17 +170,19 @@ test("a login racing a suspension can never leave a reusable credential", async 
   const f = await fixture(t);
 
   // Pause the login after it has read the (still ACTIVE) account, during password verification.
-  const original = bcrypt.compare;
+  // Password verification now runs in the hasher's worker pool, so the pause is placed on the hasher.
+  const hasher = f.app.passwordHasher;
+  const original = hasher.compare;
   let enteredCompare;
   const reached = new Promise((resolve) => { enteredCompare = resolve; });
   let release;
   const gate = new Promise((resolve) => { release = resolve; });
-  bcrypt.compare = async (...args) => {
+  hasher.compare = async (...args) => {
     enteredCompare();
     await gate;
     return original(...args);
   };
-  t.after(() => { bcrypt.compare = original; });
+  t.after(() => { hasher.compare = original; });
 
   const racing = f.app.inject({ method: "POST", url: "/auth/login", remoteAddress: freshAddress(), payload: { email: f.alice.email, password: PASSWORD } });
   await reached;
@@ -200,12 +202,12 @@ test("a login racing a suspension can never leave a reusable credential", async 
   assert.equal((await f.viaA("/files", staleToken)).statusCode, 401);
 
   // Variant: suspended (not reactivated) when the login completes.
-  bcrypt.compare = original;
+  hasher.compare = original;
   let enteredAgain;
   const reachedAgain = new Promise((resolve) => { enteredAgain = resolve; });
   let releaseAgain;
   const gateAgain = new Promise((resolve) => { releaseAgain = resolve; });
-  bcrypt.compare = async (...args) => { enteredAgain(); await gateAgain; return original(...args); };
+  hasher.compare = async (...args) => { enteredAgain(); await gateAgain; return original(...args); };
   const racing2 = f.app.inject({ method: "POST", url: "/auth/login", remoteAddress: freshAddress(), payload: { email: f.alice.email, password: PASSWORD } });
   await reachedAgain;
   await f.suspend(f.alice);

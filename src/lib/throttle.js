@@ -79,9 +79,14 @@ async function redisCheck(bucket, windowSeconds) {
   };
 }
 
+/** Identities (addresses, e-mail addresses) are never stored: every store sees only this digest. */
+function identityDigest(namespace, identity) {
+  return crypto.createHash("sha256").update(`${namespace}\u0000${identity}`).digest("hex");
+}
+
 /** Atomic fixed-window increment in PostgreSQL. The primary key serialises concurrent callers. */
 async function sharedCheck(namespace, identity, limit, windowSeconds, client = prisma) {
-  const digest = crypto.createHash("sha256").update(`${namespace}\u0000${identity}`).digest("hex");
+  const digest = identityDigest(namespace, identity);
   const rows = await client.$queryRaw`
     INSERT INTO "RateLimitWindow" ("key", "count", "expiresAt")
     VALUES (${`${namespace}:${digest}`}, 1, NOW() + (${windowSeconds} * INTERVAL '1 second'))
@@ -136,7 +141,7 @@ async function degradedCheck(namespace, identity, bucket, { limit, windowSeconds
 }
 
 async function checkThrottle(namespace, identity, { limit, windowSeconds, policy = "local" }) {
-  const bucket = key(`throttle:${namespace}`, identity);
+  const bucket = key(`throttle:${namespace}`, identityDigest(namespace, identity));
   const options = { limit, windowSeconds, policy };
 
   // Hold-down: keep counting in the shared store until the window in which Redis failed has passed.

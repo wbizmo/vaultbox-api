@@ -14,6 +14,7 @@ const { installRequestMetrics } = require("./lib/metrics");
 const { installSecurityHeaders, redactRequestUrl } = require("./lib/security");
 const { storage } = require("./lib/storage");
 const { clientIp } = require("./lib/client-ip");
+const { createPasswordHasher } = require("./lib/password-hasher");
 
 const systemRoutes = require("./routes/system.routes");
 const authRoutes = require("./routes/auth.routes");
@@ -40,6 +41,16 @@ function buildApp(options = {}) {
 
   app.decorate("vaultboxConfig", config);
   app.decorate("vaultboxStorage", storageAdapter);
+  // Password hashing runs in a bounded worker-thread pool owned by this app (tests may inject a stand-in).
+  const passwordHasher = options.passwordHasher || createPasswordHasher({
+    concurrency: config.passwordHashConcurrency,
+    maxQueue: config.passwordHashQueue,
+    maxWaitMs: config.passwordHashWaitMs
+  });
+  app.decorate("passwordHasher", passwordHasher);
+  app.addHook("onClose", async () => {
+    await passwordHasher.close?.();
+  });
   app.addHook("onReady", async () => {
     await storageAdapter.ready();
   });

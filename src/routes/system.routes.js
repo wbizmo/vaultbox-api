@@ -40,7 +40,13 @@ async function systemRoutes(app) {
       summary: "Read process and request metrics",
       security: [{ bearerAuth: [] }]
     }
-  }, async () => ({ metrics: { ...snapshotMetrics(), rateLimiter: getThrottleState() } }));
+  }, async () => ({
+    metrics: {
+      ...snapshotMetrics(),
+      rateLimiter: getThrottleState(),
+      passwordHashing: app.passwordHasher.stats?.() ?? null
+    }
+  }));
 }
 
 module.exports = systemRoutes;

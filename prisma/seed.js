@@ -34,7 +34,7 @@ async function main() {
     create: {
       name: "VaultBox Admin",
       email: "admin@vaultbox.dev",
-      password: await bcrypt.hash("Admin123!", 10),
+      password: await bcrypt.hash("Admin123!", 12),
       role: "ADMIN",
       status: "ACTIVE",
       planId: freePlan.id
@@ -53,7 +53,7 @@ async function main() {
     create: {
       name: "VaultBox User",
       email: "user@vaultbox.dev",
-      password: await bcrypt.hash("User123!", 10),
+      password: await bcrypt.hash("User123!", 12),
       role: "USER",
       status: "ACTIVE",
       planId: freePlan.id

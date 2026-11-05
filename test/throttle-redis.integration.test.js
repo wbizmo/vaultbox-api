@@ -38,6 +38,7 @@ test("Redis-backed throttle uses one eval round trip and preserves fixed-window 
 
   const keys = await redis.keys(`vaultbox:throttle:${namespace}:*`);
   assert.equal(keys.length, 1);
+  assert.ok(!keys[0].includes(identity), "the Redis key holds a digest, never the raw identity (an address or e-mail)");
   assert.ok(await redis.ttl(keys[0]) > 0);
   await redis.del(keys);
 });
