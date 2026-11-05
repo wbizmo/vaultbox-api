@@ -53,6 +53,11 @@ async function claimFileDeletions({ limit = DEFAULTS.batchSize, leaseMs = DEFAUL
   `;
 }
 
+/*
+ * Settling is fenced on the attempt number this worker claimed: if its lease lapsed and another worker has
+ * claimed the row since (attempts moved on), the late worker's outcome is ignored instead of overwriting
+ * the newer claim. Deleting is idempotent, so the newer worker simply finishes the job.
+ */
 async function finishOne(storage, row, options, client) {
   try {
     // true = removed now, false = already gone: both are a finished cleanup.
@@ -67,6 +72,7 @@ async function finishOne(storage, row, options, client) {
           "lockedUntil" = NULL,
           "lastError" = ${errorSummary(error)}
       WHERE "id" = ${row.id} AND "status" = 'PENDING'::"FileDeletionStatus"
+        AND "attempts" = ${row.attempts}
     `;
     return dead ? "dead" : "retry";
   }
@@ -74,17 +80,45 @@ async function finishOne(storage, row, options, client) {
     UPDATE "FileDeletion"
     SET "status" = 'DONE'::"FileDeletionStatus", "completedAt" = NOW(), "lockedUntil" = NULL, "lastError" = NULL
     WHERE "id" = ${row.id} AND "status" = 'PENDING'::"FileDeletionStatus"
+      AND "attempts" = ${row.attempts}
   `;
   return "done";
+}
+
+/**
+ * A job whose worker keeps dying never reaches the failure path, so attempts alone would not stop it. Once a
+ * row has used all its attempts and its last lease has lapsed, park it as DEAD for an operator instead of
+ * retrying a possible poison object forever. Live leases are left alone.
+ */
+async function deadLetterExhaustedFileDeletions(maxAttempts = DEFAULTS.maxAttempts, client = prisma) {
+  return client.$executeRaw`
+    UPDATE "FileDeletion"
+    SET "status" = 'DEAD'::"FileDeletionStatus",
+        "lockedUntil" = NULL,
+        "lastError" = COALESCE("lastError", 'worker lost on its final attempt')
+    WHERE "status" = 'PENDING'::"FileDeletionStatus"
+      AND "attempts" >= ${maxAttempts}
+      AND "lockedUntil" IS NOT NULL
+      AND "lockedUntil" <= NOW()
+  `;
 }
 
 /** One sweep: claim due rows and try to remove their bytes. Never throws for a single bad object. */
 async function processFileDeletions(storage, overrides = {}, client = prisma) {
   const options = { ...DEFAULTS, ...overrides };
+  // Housekeeping must never stop the real work: if it fails, log and carry on claiming jobs.
+  await deadLetterExhaustedFileDeletions(options.maxAttempts, client).catch((error) => {
+    options.log?.warn({ err: error }, "File deletion dead-letter reaper failed");
+  });
   const rows = await claimFileDeletions({ limit: options.batchSize, leaseMs: options.leaseMs, fileId: options.fileId || null }, client);
   const outcome = { claimed: rows.length, done: 0, retry: 0, dead: 0 };
   for (const row of rows) {
-    const result = await finishOne(storage, row, options, client).catch(() => "retry");
+    const result = await finishOne(storage, row, options, client).catch((error) => {
+      // The job-state update itself failed (database trouble): the row stays claimed until its lease lapses
+      // and is retried then. Record why, and carry on with the rest of the batch.
+      options.log?.warn({ err: error, fileId: row.fileId }, "File deletion job state update failed");
+      return "retry";
+    });
     outcome[result] += 1;
   }
   return outcome;
@@ -137,6 +171,7 @@ module.exports = {
   DEFAULTS,
   backoffMs,
   claimFileDeletions,
+  deadLetterExhaustedFileDeletions,
   processFileDeletions,
   removeFileBytesNow,
   fileDeletionStats,

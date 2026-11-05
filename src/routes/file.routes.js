@@ -60,7 +60,7 @@ async function fileRoutes(app) {
   // concurrent sweeps safe, and a crashed sweep's rows are simply claimed again once their lease lapses.
   const sweepFileDeletions = async () => {
     try {
-      await processFileDeletions(storage);
+      await processFileDeletions(storage, { log: app.log });
       await pruneFinishedFileDeletions();
     } catch (error) {
       app.log.warn({ err: error }, "File deletion sweep failed");
@@ -374,7 +374,7 @@ async function fileRoutes(app) {
 
     // The outbox row committed with the deletion, so the bytes are removed eventually even if this attempt
     // fails or the process dies right here; the worker below (and on every replica) retries with backoff.
-    const removed = await removeFileBytesNow(storage, file.id).catch((error) => {
+    const removed = await removeFileBytesNow(storage, file.id, { log: request.log }).catch((error) => {
       request.log.error({ err: error, fileId: file.id }, "Failed to remove stored file bytes; queued for retry");
       return false;
     });

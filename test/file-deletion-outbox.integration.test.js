@@ -351,3 +351,105 @@ test("claims are scoped: claiming one file's job leaves the others queued", asyn
   assert.deepEqual(claimed.map((row) => row.fileId), [a.id]);
   assert.equal((await f.outbox(b)).lockedUntil, null);
 });
+
+test("a worker whose lease lapsed cannot settle a newer claim (settlement is fenced on the claimed attempt)", async (t) => {
+  const f = await fixture(t);
+  const file = await f.createFile();
+  f.storage.failWith = Object.assign(new Error("first failure"), { code: "EIO" });
+  assert.equal((await f.del(file)).statusCode, 200);
+  f.storage.failWith = null;
+  await f.makeDue(file);
+
+  // Worker A claims the job and then stalls inside the storage call.
+  let release;
+  let entered;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const inCall = new Promise((resolve) => { entered = resolve; });
+  const stalledStorage = {
+    async deleteFile() {
+      entered();
+      await gate;
+      throw Object.assign(new Error("late failure"), { code: "EIO" });
+    }
+  };
+  const workerA = processFileDeletions(stalledStorage, { leaseMs: 60_000 });
+  await inCall;
+
+  // A's lease lapses; worker B claims the job (a newer attempt) and is still working on it.
+  await prisma.fileDeletion.update({ where: { fileId: file.id }, data: { lockedUntil: new Date(Date.now() - 1000) } });
+  const [claimB] = await claimFileDeletions({ fileId: file.id, leaseMs: 60_000 });
+  assert.ok(claimB, "B claimed after A's lease lapsed");
+
+  // A finally fails. Its outcome belongs to an older claim and must be ignored.
+  release();
+  await workerA;
+  const row = await f.outbox(file);
+  assert.equal(row.attempts, claimB.attempts, "still B's attempt");
+  assert.ok(row.lockedUntil > new Date(), "B's lease was not cleared by the late worker");
+  assert.doesNotMatch(row.lastError || "", /late failure/, "the stale failure was not recorded");
+
+  // B completes normally.
+  await prisma.fileDeletion.update({ where: { fileId: file.id }, data: { lockedUntil: new Date(Date.now() - 1000) } });
+  assert.equal((await processFileDeletions(f.storage)).done, 1);
+  assert.equal((await f.outbox(file)).status, "DONE");
+});
+
+test("a job whose worker keeps dying on the final attempt is dead-lettered, not retried forever; live leases are left alone", async (t) => {
+  const f = await fixture(t);
+  const lost = await f.createFile();
+  const live = await f.createFile();
+  f.storage.failWith = Object.assign(new Error("down"), { code: "EIO" });
+  await f.del(lost);
+  await f.del(live);
+  f.storage.failWith = null;
+  f.storage.calls.clear();
+
+  // Both used all their attempts; one worker's lease lapsed (it died), the other is genuinely still running.
+  await prisma.fileDeletion.update({
+    where: { fileId: lost.id },
+    data: { attempts: DEFAULTS.maxAttempts, lockedUntil: new Date(Date.now() - 1000), nextAttemptAt: new Date(Date.now() - 1000) }
+  });
+  await prisma.fileDeletion.update({
+    where: { fileId: live.id },
+    data: { attempts: DEFAULTS.maxAttempts, lockedUntil: new Date(Date.now() + 60_000), nextAttemptAt: new Date(Date.now() - 1000) }
+  });
+
+  const outcome = await processFileDeletions(f.storage);
+  assert.equal(outcome.claimed, 0, "nothing was attempted again");
+  const deadRow = await f.outbox(lost);
+  assert.equal(deadRow.status, "DEAD");
+  assert.ok(deadRow.lastError, "the reason is recorded");
+  assert.equal(deadRow.lockedUntil, null);
+  assert.equal((await f.outbox(live)).status, "PENDING", "a live lease is never reaped");
+  assert.equal(f.storage.calls.size, 0, "storage was not called for either");
+  assert.equal(await f.exists(lost), true, "the object is left for the operator");
+});
+
+test("a failing job-state update is logged with the file id and does not stop the rest of the batch", async (t) => {
+  const f = await fixture(t);
+  const a = await f.createFile();
+  const b = await f.createFile();
+  f.storage.failWith = Object.assign(new Error("down"), { code: "EIO" });
+  await f.del(a);
+  await f.del(b);
+  f.storage.failWith = null;
+  await f.makeDue(a);
+  await f.makeDue(b);
+  f.storage.calls.clear();
+
+  const warnings = [];
+  const flakyClient = {
+    $queryRaw: prisma.$queryRaw.bind(prisma),
+    $executeRaw(strings, ...values) {
+      // Only the "mark DONE" settlement fails; the reaper and the claim keep working.
+      if (strings.join("?").includes("\"completedAt\" = NOW()")) return Promise.reject(new Error("database hiccup"));
+      return prisma.$executeRaw(strings, ...values);
+    }
+  };
+  const outcome = await processFileDeletions(f.storage, { log: { warn: (details, message) => warnings.push({ details, message }) } }, flakyClient);
+  assert.equal(outcome.claimed, 2);
+  assert.equal(outcome.retry, 2, "both reported as needing a retry");
+  assert.equal(f.storage.calls.size, 2, "the second job was still attempted");
+  assert.deepEqual(warnings.map((w) => w.details.fileId).sort(), [a.id, b.id].sort());
+  assert.match(warnings[0].details.err.message, /database hiccup/);
+});
