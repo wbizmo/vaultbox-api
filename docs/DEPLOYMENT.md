@@ -86,6 +86,23 @@ UPDATE "User" SET "role" = 'USER', "authVersion" = "authVersion" + 1 WHERE "emai
 
 **Cost.** One primary-key lookup per authenticated request, replacing the previous 10-second Redis cache.
 
+## Rate limiting and Redis outages
+
+Throttling is a fixed window per route class. **Healthy:** one atomic Redis Lua round trip decides, so a limit is global across replicas (it is not multiplied by the replica count).
+
+**Redis unavailable** (not configured, not connected, or a command failed) is handled by an explicit per-route policy:
+
+| Route class | Routes | Policy while Redis is down |
+| --- | --- | --- |
+| Abuse-sensitive (`shared`) | `POST /auth/login`, `POST /auth/register`, `POST /files/:id/download-token` | A PostgreSQL fixed-window counter (`RateLimitWindow`, one atomic upsert) keeps the limit **global across replicas**. If PostgreSQL cannot answer either, the request is **refused** with `503` + `Retry-After` (fail closed); a per-process counter is never trusted for these routes. |
+| Other (`local`) | upload-session create / part | Bounded per-process window (degraded: the limit is per replica until Redis returns). |
+
+- **Reconnect hold-down.** After any degraded decision for a sensitive route, that route stays on the PostgreSQL counter for one full window instead of flipping straight back to Redis, whose counters know nothing about the outage; attempts made during the outage keep counting. If only *some* replicas lose Redis, the two stores are separate for up to one window, so the effective limit is at most 2x for that window.
+- **Login caps.** Login is limited per (address, account) pair, additionally per account across all addresses (30 / 15 min) and per address across all accounts (120 / 5 min). Registration stays 8 / 10 min per address.
+- **No identities stored.** `RateLimitWindow` keys are SHA-256 digests of namespace and identity (no emails or addresses); finished windows are pruned opportunistically in small batches. No cron job is needed.
+- **Diagnostics.** The admin-only `GET /metrics` includes `metrics.rateLimiter` (`mode`: `redis` / `degraded` / `no_redis`, decision counters, namespaces in hold-down). Treat `degraded` on a multi-replica deployment as reduced protection and alert on it. `GET /infra/health` still reports Redis itself.
+- **Migration** `20261105100000_rate_limit_windows` adds one small table; rolling back the application leaves it unused.
+
 ## Plan entitlements and billing webhook
 
 `PATCH /plans/:planId/subscribe` no longer lets any authenticated user select a paid plan. A plan with `priceMonthly > 0` is activated only when the user holds an `ACTIVE`, in-period `PlanEntitlement` for that exact plan, checked in the same SQL statement that switches the plan and verifies `storageUsed + reservedUploadBytes` fits the new limit. Free plans remain self-service.

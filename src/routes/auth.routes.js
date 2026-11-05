@@ -2,11 +2,25 @@ const bcrypt = require("bcryptjs");
 const prisma = require("../lib/prisma");
 const { throttlePreHandler } = require("../lib/throttle");
 
-const registerThrottle = throttlePreHandler("register", { limit: 8, windowSeconds: 600 });
+// Abuse-sensitive: when Redis is down these use the shared PostgreSQL counter (never a per-process one)
+// and fail closed if that is unavailable too. See lib/throttle.js.
+const registerThrottle = throttlePreHandler("register", { limit: 8, windowSeconds: 600, policy: "shared" });
 const loginThrottle = throttlePreHandler(
   "login",
-  { limit: 10, windowSeconds: 300 },
+  { limit: 10, windowSeconds: 300, policy: "shared" },
   (request) => `${request.ip}:${normalizeEmail(request.body?.email || "unknown")}`
+);
+// Independent global caps: one account cannot be guessed at from many addresses, and one address
+// cannot spray many accounts, even though each (ip, email) pair stays under its own limit.
+const loginAccountThrottle = throttlePreHandler(
+  "login-account",
+  { limit: 30, windowSeconds: 900, policy: "shared" },
+  (request) => normalizeEmail(request.body?.email || "unknown")
+);
+const loginAddressThrottle = throttlePreHandler(
+  "login-address",
+  { limit: 120, windowSeconds: 300, policy: "shared" },
+  (request) => request.ip
 );
 
 function normalizeEmail(email) {
@@ -105,7 +119,7 @@ async function authRoutes(app) {
   });
 
   app.post("/auth/login", {
-    preHandler: loginThrottle,
+    preHandler: [loginAddressThrottle, loginAccountThrottle, loginThrottle],
     schema: {
       tags: ["Auth"],
       summary: "Login and receive a JWT token",

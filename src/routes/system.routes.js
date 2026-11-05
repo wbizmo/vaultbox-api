@@ -1,5 +1,6 @@
 const { version } = require("../../package.json");
 const { snapshotMetrics } = require("../lib/metrics");
+const { getThrottleState } = require("../lib/throttle");
 const { requireAuth } = require("../middleware/auth");
 const { requireAdmin } = require("../middleware/admin");
 
@@ -39,7 +40,7 @@ async function systemRoutes(app) {
       summary: "Read process and request metrics",
       security: [{ bearerAuth: [] }]
     }
-  }, async () => ({ metrics: snapshotMetrics() }));
+  }, async () => ({ metrics: { ...snapshotMetrics(), rateLimiter: getThrottleState() } }));
 }
 
 module.exports = systemRoutes;

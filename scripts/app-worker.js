@@ -34,6 +34,12 @@ const app = buildApp({
   }
 });
 
-app.listen({ port: 0, host: "127.0.0.1" }).then(() => {
+// WORKER_CONNECT_REDIS=1 connects Redis like src/server.js does; otherwise the worker runs with the
+// rate limiter's Redis-unavailable behaviour (set REDIS_URL empty to also have no client at all).
+const ready = process.env.WORKER_CONNECT_REDIS === "1"
+  ? require("../src/lib/redis").connectRedis()
+  : Promise.resolve();
+
+ready.then(() => app.listen({ port: 0, host: "127.0.0.1" })).then(() => {
   process.send({ port: app.server.address().port });
 });
