@@ -4,7 +4,7 @@ const {
   releaseUploadReservation,
   commitUploadReservation
 } = require("./quota");
-const { lockUserForUpdate } = require("./upload-session");
+const { lockUserForUpdate, lockActiveUserForUpdate } = require("./upload-session");
 const { retryOnConflict } = require("./db-retry");
 
 /*
@@ -22,7 +22,7 @@ const { retryOnConflict } = require("./db-retry");
 /** Create the reservation and reserve quota in ONE transaction. Returns { id } or null if it does not fit. */
 async function createReservation(userId, bytes, leaseMs, client = prisma) {
   return retryOnConflict(() => client.$transaction(async (tx) => {
-    if (!(await lockUserForUpdate(tx, userId))) return null;
+    if (!(await lockActiveUserForUpdate(tx, userId))) return null;
     const quota = await reservePendingUploadQuota(userId, bytes, tx);
     if (!quota) return null;
     const row = await tx.uploadReservation.create({

@@ -13,7 +13,7 @@ const {
   validateChecksum,
   missingPartNumbers,
   assertCompleteParts,
-  lockUserForUpdate,
+  lockActiveUserForUpdate,
   insertPartIfOpen,
   releaseSession,
   claimCompletion,
@@ -169,6 +169,7 @@ async function uploadRoutes(app) {
     let session;
     try {
       session = await prisma.$transaction(async (tx) => {
+        await lockActiveUserForUpdate(tx, request.user.id);
         const reservation = await reservePendingUploadQuota(request.user.id, expectedSize, tx);
         if (!reservation) {
           const error = new Error("Storage quota exceeded");
@@ -493,7 +494,7 @@ async function uploadRoutes(app) {
     try {
       committed = await retryOnConflict(() => prisma.$transaction(async (tx) => {
         // Lock order: User first, UploadSession second (see lib/upload-session.js).
-        await lockUserForUpdate(tx, request.user.id);
+        await lockActiveUserForUpdate(tx, request.user.id);
         const owned = await tx.uploadSession.findFirst({
           where: { id: session.id, userId: request.user.id, status: "COMPLETING", completionToken: token },
           select: { id: true }

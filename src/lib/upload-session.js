@@ -2,6 +2,7 @@ const crypto = require("node:crypto");
 const prisma = require("./prisma");
 const { releaseUploadReservation } = require("./quota");
 const { retryOnConflict } = require("./db-retry");
+const { AppError } = require("./errors");
 
 /*
  * Lock acquisition order (documented invariant, see docs/UPLOADS.md):
@@ -15,6 +16,41 @@ const { retryOnConflict } = require("./db-retry");
 async function lockUserForUpdate(tx, userId) {
   const rows = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${userId} FOR UPDATE`;
   return rows.length > 0;
+}
+
+/**
+ * Account-state fence for transactions that create NEW usage (quota reservations, sessions, files,
+ * folders, plan changes). Locks the user row (same position in the lock order as lockUserForUpdate)
+ * and throws 403 ACCOUNT_NOT_ACTIVE unless the account is ACTIVE *now*. Because suspension updates the
+ * same row, it either commits before this lock (the transaction is rejected) or waits until this
+ * transaction ends (the transaction is entirely before the suspension). Returns false for an unknown user.
+ *
+ * Cleanup (abort, expiry, stale recovery, reservation release) deliberately uses lockUserForUpdate,
+ * which never looks at the status: a suspended account must still be able to give resources back.
+ */
+async function lockActiveUserForUpdate(tx, userId) {
+  const rows = await tx.$queryRaw`SELECT "status"::text AS "status" FROM "User" WHERE "id" = ${userId} FOR UPDATE`;
+  if (rows.length === 0) return false;
+  assertActiveStatus(rows[0].status);
+  return true;
+}
+
+/**
+ * Shared-lock variant for creations that do not touch the quota counters (parts, folders, tokens):
+ * concurrent creations by one account do not block each other (and cannot deadlock by upgrading a
+ * foreign-key share lock), but a suspension -- an UPDATE of this row -- still cannot interleave.
+ */
+async function lockActiveUserShared(tx, userId) {
+  const rows = await tx.$queryRaw`SELECT "status"::text AS "status" FROM "User" WHERE "id" = ${userId} FOR SHARE`;
+  if (rows.length === 0) return false;
+  assertActiveStatus(rows[0].status);
+  return true;
+}
+
+function assertActiveStatus(status) {
+  if (status !== "ACTIVE") {
+    throw new AppError(403, "ACCOUNT_NOT_ACTIVE", `Account is ${String(status).toLowerCase()}`);
+  }
 }
 
 const CHECKSUM_RE = /^[a-f0-9]{64}$/i;
@@ -141,6 +177,9 @@ async function releaseSession(session, targetStatus, client = prisma) {
  */
 async function insertPartIfOpen(session, data, client = prisma) {
   return client.$transaction(async (tx) => {
+    // Owner first (User before UploadSession, like every other path), shared: parts of one account do
+    // not block each other, but a suspension cannot interleave.
+    await lockActiveUserShared(tx, session.userId);
     const rows = await tx.$queryRaw`
       SELECT "status"::text AS "status", "expiresAt" AS "expiresAt"
       FROM "UploadSession"
@@ -332,6 +371,8 @@ module.exports = {
   missingPartNumbers,
   assertCompleteParts,
   lockUserForUpdate,
+  lockActiveUserForUpdate,
+  lockActiveUserShared,
   releaseSession,
   insertPartIfOpen,
   claimCompletion,

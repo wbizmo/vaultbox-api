@@ -1,6 +1,7 @@
 const prisma = require("../lib/prisma");
 const { requireAuth } = require("../middleware/auth");
 const { formatBytes } = require("../lib/bytes");
+const { AppError } = require("../lib/errors");
 const { switchPlanIfFits } = require("../lib/quota");
 const { switchPlanIfEntitled, hasActiveEntitlement } = require("../lib/entitlements");
 
@@ -73,6 +74,16 @@ async function planRoutes(app) {
       ? await switchPlanIfFits(request.user.id, plan.id)
       : await switchPlanIfEntitled(request.user.id, plan.id);
     if (!switched) {
+      // Not admitted: say why. A suspended/deleted account (in-flight request authenticated before the
+      // change) is a 403, distinct from entitlement and quota refusals.
+      const account = await prisma.user.findUnique({
+        where: { id: request.user.id },
+        select: { status: true }
+      });
+      if (account && account.status !== "ACTIVE") {
+        throw new AppError(403, "ACCOUNT_NOT_ACTIVE", `Account is ${String(account.status).toLowerCase()}`);
+      }
+
       if (!demoMode && plan.priceMonthly > 0 && !(await hasActiveEntitlement(request.user.id, plan.id))) {
         return reply.code(403).send({ message: "This plan requires an active entitlement" });
       }

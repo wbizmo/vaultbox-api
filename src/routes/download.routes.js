@@ -6,6 +6,7 @@ const { parseSingleRange, rangeHeader } = require("../lib/range");
 const { createDownloadToken, hashDownloadToken, etagForChecksum } = require("../lib/download-token");
 const { recordFirstDownload } = require("../lib/download-session");
 const { throttlePreHandler } = require("../lib/throttle");
+const { lockActiveUserShared } = require("../lib/upload-session");
 
 const tokenThrottle = throttlePreHandler(
   "download-token",
@@ -159,13 +160,16 @@ async function downloadRoutes(app) {
     );
     const token = createDownloadToken();
 
-    await prisma.downloadToken.create({
-      data: {
-        token: token.hash,
-        fileId: file.id,
-        userId: request.user.id,
-        expiresAt
-      }
+    await prisma.$transaction(async (tx) => {
+      await lockActiveUserShared(tx, request.user.id);
+      await tx.downloadToken.create({
+        data: {
+          token: token.hash,
+          fileId: file.id,
+          userId: request.user.id,
+          expiresAt
+        }
+      });
     });
 
     await prisma.auditLog.create({
