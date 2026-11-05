@@ -8,6 +8,7 @@ const { createDownloadToken, hashDownloadToken, etagForChecksum } = require("../
 const { recordFirstDownload, revokeDownloadSessions } = require("../lib/download-session");
 const { throttlePreHandler } = require("../lib/throttle");
 const { lockActiveUserShared } = require("../lib/upload-session");
+const { tokenVersion } = require("../lib/account");
 
 const tokenThrottle = throttlePreHandler(
   "download-token",
@@ -184,7 +185,7 @@ async function downloadRoutes(app) {
 
     let sessionId;
     await prisma.$transaction(async (tx) => {
-      await lockActiveUserShared(tx, request.user.id);
+      await lockActiveUserShared(tx, request.user.id, tokenVersion(request.user));
       const created = await tx.downloadToken.create({
         data: {
           token: token.hash,

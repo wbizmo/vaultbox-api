@@ -271,3 +271,34 @@ test("the bearer value never appears in application logs, audit rows or metrics"
   const metrics = JSON.stringify(snapshotMetrics());
   for (const secret of secrets) assert.ok(!metrics.includes(secret), "no raw token or token hash in metrics");
 });
+
+test("a request authenticated before \"log out everywhere\" cannot mint a download session after it", async (t) => {
+  const f = await fixture(t);
+  const headers = await f.auth(f.alice); // carries the pre-revocation session version
+
+  // Hold the User row exactly as a committing revokeSessions would: the issuance request passes
+  // authentication (plain read, no lock wait), then blocks on the shared row lock inside its transaction.
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  let locked;
+  const lockTaken = new Promise((resolve) => { locked = resolve; });
+  const revoker = prisma.$transaction(async (tx) => {
+    await revokeSessions(f.alice.id, tx);
+    locked();
+    await held;
+  }, { timeout: 20_000 });
+  await lockTaken;
+
+  const pending = f.app.inject({ method: "POST", url: `/files/${f.aliceFile.id}/download-token`, headers });
+  await new Promise((resolve) => setTimeout(resolve, 500)); // let it reach the lock wait
+  release();
+  await revoker;
+
+  const res = await pending;
+  assert.equal(res.statusCode, 401, res.body);
+  assert.equal(await prisma.downloadToken.count({ where: { userId: f.alice.id } }), 0, "no session was created after the revocation");
+
+  // A fresh login (current version) can issue again.
+  const fresh = await f.issue(f.alice, f.aliceFile);
+  assert.equal((await f.app.inject({ method: "GET", url: fresh.url })).statusCode, 200);
+});
