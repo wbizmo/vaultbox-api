@@ -295,3 +295,31 @@ test("status/role changes bump the session version atomically and registration i
   assert.equal(tokenVersion(f.app.jwt.decode(registered.json().token)), created.authVersion);
   assert.equal((await f.viaA("/me", registered.json().token)).statusCode, 200);
 });
+
+test("a database failure during authentication is a 503, never a 401, and bad tokens never reach the database", async (t) => {
+  const f = await fixture(t);
+  const token = await f.login(f.alice);
+
+  const original = prisma.user.findUnique;
+  let lookups = 0;
+  prisma.user.findUnique = async () => {
+    lookups += 1;
+    throw new Error("connection terminated unexpectedly");
+  };
+  t.after(() => { prisma.user.findUnique = original; });
+
+  const outage = await f.viaA("/me", token);
+  assert.equal(outage.statusCode, 503, outage.body);
+  assert.equal(outage.json().error.code, "AUTH_UNAVAILABLE");
+  assert.ok(!/connection terminated/.test(outage.body), "internal error text is not exposed");
+  assert.equal(lookups, 1);
+
+  // Token problems are still 401 and do not touch the database.
+  lookups = 0;
+  assert.equal((await f.viaA("/me", "not-a-jwt")).statusCode, 401);
+  assert.equal((await f.viaA("/me")).statusCode, 401);
+  assert.equal(lookups, 0);
+
+  prisma.user.findUnique = original;
+  assert.equal((await f.viaA("/me", token)).statusCode, 200, "service resumes when the database does");
+});
