@@ -1,6 +1,6 @@
 # VaultBox production deployment
 
-VaultBox v2.2.0 is deployed with **Render + Neon PostgreSQL + Upstash Redis**.
+VaultBox v2.2.0 targets deployment on **Render + Neon PostgreSQL + Upstash Redis**.
 
 ## Production contract
 
