@@ -283,6 +283,15 @@ test("first download: the started flag and its event cannot disagree", async (t)
   sharedStorage.root = f.storage.root;
   sharedStorage.partsRoot = f.storage.partsRoot;
   t.after(() => Object.assign(sharedStorage, original));
+  // Track every read stream the routes open, to prove none is left open when recording the event fails.
+  const opened = [];
+  const openRead = sharedStorage.openReadStreamForFile.bind(sharedStorage);
+  sharedStorage.openReadStreamForFile = async (...args) => {
+    const stream = await openRead(...args);
+    opened.push(stream);
+    return stream;
+  };
+  t.after(() => { delete sharedStorage.openReadStreamForFile; });
   const ok = await f.upload(Buffer.from("abcdefgh"), "dl-secret.bin");
   const fileId = ok.json().file.id;
   const token = await f.app.inject({ method: "POST", url: `/files/${fileId}/download-token`, headers: f.bearer(f.user) });
@@ -294,6 +303,8 @@ test("first download: the started flag and its event cannot disagree", async (t)
   const restore = await breakAudit(t, `NEW."action" = 'DOWNLOAD_SESSION_STARTED' AND NEW."userId" = '${f.user.id}'`);
   const failed = await f.app.inject({ method: "GET", url });
   assert.equal(failed.statusCode, 500, "an event that cannot be recorded does not start the session");
+  assert.equal(opened.length, 1, "the failing request had opened the file");
+  assert.ok(opened.every((stream) => stream.destroyed), "its read stream (and file descriptor) was released");
   assert.equal((await row()).usedAt, null, "usedAt stays unset together with the missing event");
   assert.equal((await f.events("DOWNLOAD_SESSION_STARTED")).length, 0);
 

@@ -90,7 +90,7 @@ UPDATE "User" SET "role" = 'USER', "authVersion" = "authVersion" + 1 WHERE "emai
 
 ## Audit events
 
-Every state change is audited **in the same PostgreSQL transaction as the change** (`src/lib/audit.js`). The two therefore always agree:
+Each audited state change (the critical events listed below) is written **in the same PostgreSQL transaction as the change** (`src/lib/audit.js`). The two therefore always agree:
 
 - the change commits ⇒ its audit row exists (there is no separate step that can fail after the commit);
 - the audit insert fails ⇒ the whole transaction rolls back, the client receives an error, and nothing happened (no file, quota change, session, account, plan switch or revocation), so a **retry is safe** and the error is never ambiguous. Concurrent duplicate requests emit exactly one event because the compare-and-set that decides who performs the change is in the same transaction.
@@ -101,7 +101,7 @@ Every state change is audited **in the same PostgreSQL transaction as the change
 | **Critical, no state change** | `LOGIN` | written before any token exists; on failure no token is issued |
 | **Best effort, after the commit** | `FILE_DELETED_METADATA_ONLY` (the stored bytes could not be removed after the deletion committed) | the failure is logged and swallowed; it cannot change the outcome of the already-committed operation |
 
-The audit table is the durable store and is written atomically, so there is no delivery backlog to drain or monitor; durable retries for removing stored **bytes** are tracked separately (#54). Audit `details` hold identifiers (file, session and user ids) and sizes only, never file names, e-mail addresses or tokens; this is a **change from earlier versions**, which stored file names and e-mail addresses in `details`. Existing rows are not rewritten.
+**Not audited today:** folder writes, upload-session and reservation expiry performed by the background sweeper, and billing-webhook entitlement changes (the webhook's own `BillingEvent` rows are its idempotent record). The guarantee above applies only to the events in the table. The audit table is the durable store and is written atomically, so there is no delivery backlog to drain or monitor; durable retries for removing stored **bytes** are tracked separately (#54). Audit `details` hold identifiers (file, session and user ids) and sizes only, never file names, e-mail addresses or tokens; this is a **change from earlier versions**, which stored file names and e-mail addresses in `details`. Existing rows are not rewritten.
 
 ## Client IP and trusted proxies
 

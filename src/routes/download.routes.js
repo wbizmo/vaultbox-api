@@ -78,6 +78,20 @@ async function openDownloadStream(reply, file, options) {
   }
 }
 
+/**
+ * Record the first use while a read stream is already open. If recording fails (for example the audit
+ * insert is rejected and the transaction rolls back) nothing will ever consume or close that stream, so
+ * destroy it -- otherwise its file descriptor leaks -- and let the original error produce the response.
+ */
+async function recordFirstDownloadOrRelease(record, request, stream) {
+  try {
+    await recordFirstDownload(record, clientIp(request));
+  } catch (error) {
+    stream.destroy();
+    throw error;
+  }
+}
+
 async function serveDownload(request, reply, headOnly = false) {
   const record = await validateDownload(request, reply, headOnly);
   if (!record) return;
@@ -116,7 +130,7 @@ async function serveDownload(request, reply, headOnly = false) {
     });
     if (!stream) return;
 
-    await recordFirstDownload(record, clientIp(request));
+    await recordFirstDownloadOrRelease(record, request, stream);
     return reply.send(stream);
   }
 
@@ -129,7 +143,7 @@ async function serveDownload(request, reply, headOnly = false) {
   const stream = await openDownloadStream(reply, file);
   if (!stream) return;
 
-  await recordFirstDownload(record, clientIp(request));
+  await recordFirstDownloadOrRelease(record, request, stream);
   return reply.send(stream);
 }
 
