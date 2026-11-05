@@ -1,4 +1,5 @@
 const prisma = require("../lib/prisma");
+const { clientIp } = require("../lib/client-ip");
 const { requireAuth } = require("../middleware/auth");
 const { verifyWebhookSignature, applyBillingEvent } = require("../lib/entitlements");
 
@@ -84,7 +85,7 @@ async function billingRoutes(app) {
           action: "PAYMENT_FAILED",
           details: "Simulated billing failure. Account suspended.",
           userId: updated.id,
-          ip: request.ip
+          ip: clientIp(request)
         }
       });
 

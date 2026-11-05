@@ -1,3 +1,5 @@
+const { parseTrustProxy } = require("../lib/client-ip");
+
 function parseInteger(value, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
   const parsed = Number.parseInt(value ?? "", 10);
   if (!Number.isFinite(parsed)) return fallback;
@@ -18,9 +20,15 @@ function getConfig() {
     max: 10 * 1024 * 1024 * 1024
   });
 
+  const trust = parseTrustProxy(process.env.TRUST_PROXY, { isProduction: nodeEnv === "production" });
+
   return {
     nodeEnv,
     isProduction: nodeEnv === "production",
+    // Which peers are our reverse proxies (see lib/client-ip.js). Never a bare boolean or hop count.
+    trustProxy: trust.policy,
+    trustProxySource: trust.source,
+    trustProxyError: trust.error,
     port: parseInteger(process.env.PORT, 4000, { min: 1, max: 65535 }),
     jwtSecret: process.env.JWT_SECRET || "",
     jwtExpiresIn: process.env.JWT_EXPIRES_IN || "7d",
@@ -84,6 +92,10 @@ function assertRuntimeConfig(config = getConfig()) {
     errors.push("JWT_SECRET is required");
   } else if (config.isProduction && config.jwtSecret.length < 32) {
     errors.push("JWT_SECRET must be at least 32 characters in production");
+  }
+
+  if (config.trustProxyError) {
+    errors.push(config.trustProxyError);
   }
 
   if (errors.length > 0) {

@@ -11,6 +11,13 @@ async function start() {
   const config = assertRuntimeConfig();
   const app = buildApp({ config });
 
+  if (config.isProduction && config.trustProxySource === "default") {
+    app.log.warn(
+      "TRUST_PROXY is not set; trusting private-network proxies only. Verify with GET /admin/network-diagnostics " +
+      "and set TRUST_PROXY to your ingress addresses if clientIp shows the proxy instead of the client"
+    );
+  }
+
   try {
     try {
       await connectRedis();

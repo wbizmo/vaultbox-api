@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const { clientIp } = require("../lib/client-ip");
 const { pipeline } = require("stream/promises");
 
 const prisma = require("../lib/prisma");
@@ -30,12 +31,12 @@ const { throttlePreHandler } = require("../lib/throttle");
 const createThrottle = throttlePreHandler(
   "upload-session-create",
   { limit: 30, windowSeconds: 60 },
-  (request) => request.user?.id || request.ip
+  (request) => request.user?.id || clientIp(request)
 );
 const partThrottle = throttlePreHandler(
   "upload-session-part",
   { limit: 240, windowSeconds: 60 },
-  (request) => request.user?.id || request.ip
+  (request) => request.user?.id || clientIp(request)
 );
 
 function closedSessionReply(reply, status) {
@@ -204,7 +205,7 @@ async function uploadRoutes(app) {
         action: "UPLOAD_SESSION_CREATED",
         details: `${session.id}:${session.originalName}:${session.expectedSize}`,
         userId: request.user.id,
-        ip: request.ip
+        ip: clientIp(request)
       }
     });
 
@@ -558,7 +559,7 @@ async function uploadRoutes(app) {
         action: "UPLOAD_SESSION_COMPLETED",
         details: `${session.id}:${committed.file.id}:${assembled.size}`,
         userId: request.user.id,
-        ip: request.ip
+        ip: clientIp(request)
       }
     });
 
@@ -610,7 +611,7 @@ async function uploadRoutes(app) {
         action: "UPLOAD_SESSION_ABORTED",
         details: `${session.id}:${session.originalName}`,
         userId: request.user.id,
-        ip: request.ip
+        ip: clientIp(request)
       }
     });
     return { message: "Upload session aborted" };
