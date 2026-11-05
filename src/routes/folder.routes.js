@@ -11,7 +11,7 @@ async function folderRoutes(app) {
     schema: {
       tags: ["Folders"],
       summary: "Create folder",
-      description: "Send an `Idempotency-Key` header (1-128 chars of letters, digits and `. _ : ~ -`) to make retries safe. The same user, key and body replays the original response (`Idempotent-Replay: true`); the same key with a different body returns 422; an identical request still running longer than the wait returns 409 with `Retry-After`. Keys are scoped to the authenticated user and kept for 24 hours.",
+      description: "Send an `Idempotency-Key` header (1-128 chars of letters, digits and `. _ : ~ -`) to make retries safe. The same user, key and body replays the original response (`Idempotent-Replay: true`); the same key with a different body returns 422; an identical request still running longer than the wait returns 409 with `Retry-After`; other idempotent requests of the same account keep it busy returns 429 with `Retry-After`. Keys are scoped to the authenticated user and kept for 24 hours.",
       security: [{ bearerAuth: [] }],
       headers: {
         type: "object",
@@ -63,6 +63,12 @@ async function folderRoutes(app) {
       if (error.code === "IDEMPOTENCY_IN_PROGRESS") {
         reply.header("Retry-After", "1");
         return reply.code(409).send({ message: "An identical request is still in progress; retry shortly" });
+      }
+      if (error.code === "IDEMPOTENCY_BUSY") {
+        // Not an identical request: this account has other idempotent requests in flight (or the
+        // in-process queue is full). Distinct from the 409 above so clients do not treat it as a duplicate.
+        reply.header("Retry-After", "1");
+        return reply.code(429).send({ message: "Too many concurrent idempotent requests for this account; retry shortly" });
       }
       throw error;
     }
