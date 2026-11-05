@@ -1,5 +1,6 @@
 const bcrypt = require("bcryptjs");
 const { clientIp } = require("../lib/client-ip");
+const { recordAudit } = require("../lib/audit");
 const prisma = require("../lib/prisma");
 const { throttlePreHandler } = require("../lib/throttle");
 
@@ -91,14 +92,20 @@ async function authRoutes(app) {
 
     let user;
     try {
-      user = await prisma.user.create({
-        data: {
-          name,
-          email,
-          password: hashedPassword,
-          planId: freePlan?.id
-        },
-        include: { plan: true }
+      // The account and its audit event commit together: a failing audit insert leaves no account behind,
+      // so a retry is not met with a confusing "Email already registered".
+      user = await prisma.$transaction(async (tx) => {
+        const created = await tx.user.create({
+          data: {
+            name,
+            email,
+            password: hashedPassword,
+            planId: freePlan?.id
+          },
+          include: { plan: true }
+        });
+        await recordAudit(tx, { action: "ACCOUNT_REGISTERED", details: created.id, userId: created.id, ip: clientIp(request) });
+        return created;
       });
     } catch (error) {
       if (error.code === "P2002") {
@@ -106,14 +113,6 @@ async function authRoutes(app) {
       }
       throw error;
     }
-
-    await prisma.auditLog.create({
-      data: {
-        action: "ACCOUNT_REGISTERED",
-        userId: user.id,
-        ip: clientIp(request)
-      }
-    });
 
     const token = app.jwt.sign({ id: user.id, email: user.email, role: user.role, av: user.authVersion });
     return reply.code(201).send({ message: "Account created successfully", token, user: publicUser(user) });
@@ -146,9 +145,9 @@ async function authRoutes(app) {
     const passwordMatches = await bcrypt.compare(request.body.password, user.password);
     if (!passwordMatches) return reply.code(401).send({ message: "Invalid email or password" });
 
-    await prisma.auditLog.create({
-      data: { action: "LOGIN", userId: user.id, ip: clientIp(request) }
-    });
+    // Critical but not a state change: it is written before any token exists, so if it fails the caller
+    // gets an error and no credential was issued (an accurate, retryable outcome).
+    await recordAudit(prisma, { action: "LOGIN", userId: user.id, ip: clientIp(request) });
 
     // Sign with the session version read together with the status we just checked. If the account
     // is suspended/deleted/demoted between that read and now, the version moves on and this token

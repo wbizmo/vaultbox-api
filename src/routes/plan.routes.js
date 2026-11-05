@@ -1,5 +1,6 @@
 const prisma = require("../lib/prisma");
 const { clientIp } = require("../lib/client-ip");
+const { recordAudit } = require("../lib/audit");
 const { requireAuth } = require("../middleware/auth");
 const { formatBytes } = require("../lib/bytes");
 const { AppError } = require("../lib/errors");
@@ -71,9 +72,20 @@ async function planRoutes(app) {
     if (!plan) return reply.code(404).send({ message: "Plan not found" });
 
     const demoMode = app.vaultboxConfig?.planSwitchMode === "demo";
+    // The plan change and its audit event are one transaction in both modes.
+    const audit = (tx) => recordAudit(tx, {
+      action: "PLAN_CHANGED",
+      details: `${request.user.id}:${plan.id}`,
+      userId: request.user.id,
+      ip: clientIp(request)
+    });
     const switched = demoMode
-      ? await switchPlanIfFits(request.user.id, plan.id)
-      : await switchPlanIfEntitled(request.user.id, plan.id);
+      ? await prisma.$transaction(async (tx) => {
+          const changed = await switchPlanIfFits(request.user.id, plan.id, tx);
+          if (changed) await audit(tx);
+          return changed;
+        })
+      : await switchPlanIfEntitled(request.user.id, plan.id, prisma, audit);
     if (!switched) {
       // Not admitted: say why. A suspended/deleted account (in-flight request authenticated before the
       // change) is a 403, distinct from entitlement and quota refusals.
@@ -100,15 +112,6 @@ async function planRoutes(app) {
         selectedPlanLimit: plan.storageLimit.toString()
       });
     }
-
-    await prisma.auditLog.create({
-      data: {
-        action: "PLAN_CHANGED",
-        details: `Changed to ${plan.name} plan`,
-        userId: request.user.id,
-        ip: clientIp(request)
-      }
-    });
 
     return { message: "Plan updated successfully", plan: serializePlan(plan) };
   });

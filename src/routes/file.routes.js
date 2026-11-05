@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const { clientIp } = require("../lib/client-ip");
+const { recordAudit, recordAuditBestEffort } = require("../lib/audit");
 const { pipeline } = require("stream/promises");
 
 const prisma = require("../lib/prisma");
@@ -197,6 +198,15 @@ async function fileRoutes(app) {
         });
         if (expectedSize !== null) await linkReservationFile(tx, reservationId, created.id);
 
+        // Critical audit event, atomic with the file and the quota change: if it cannot be written the
+        // whole upload rolls back (bytes removed below, reservation returned) and a retry is safe.
+        await recordAudit(tx, {
+          action: "FILE_UPLOADED",
+          details: `${created.id}:${fileSize}`,
+          userId: user.id,
+          ip: clientIp(request)
+        });
+
         return { file: created, reservation };
       }));
 
@@ -227,15 +237,6 @@ async function fileRoutes(app) {
 
       throw error;
     }
-
-    await prisma.auditLog.create({
-      data: {
-        action: "FILE_UPLOADED",
-        details: `${file.id}:${originalName}`,
-        userId: user.id,
-        ip: clientIp(request)
-      }
-    });
 
     return reply.code(201).send({
       message: "File uploaded successfully",
@@ -340,7 +341,19 @@ async function fileRoutes(app) {
       }
     }
   }, async (request, reply) => {
-    const file = await softDeleteFileWithQuota(request.user.id, request.params.id);
+    // The status change, the quota decrement and the audit event are one transaction: a failing audit
+    // insert rolls the deletion back instead of leaving a deleted file behind an error response.
+    const file = await prisma.$transaction(async (tx) => {
+      const deleted = await softDeleteFileWithQuota(request.user.id, request.params.id, tx);
+      if (!deleted) return null;
+      await recordAudit(tx, {
+        action: "FILE_DELETED",
+        details: deleted.id,
+        userId: request.user.id,
+        ip: clientIp(request)
+      });
+      return deleted;
+    });
     if (!file) return reply.code(404).send({ message: "File not found" });
 
     const removed = await storage.deleteFile(file).catch((error) => {
@@ -348,14 +361,16 @@ async function fileRoutes(app) {
       return false;
     });
 
-    await prisma.auditLog.create({
-      data: {
-        action: removed ? "FILE_DELETED" : "FILE_DELETED_METADATA_ONLY",
-        details: `${file.id}:${file.originalName}`,
+    if (!removed) {
+      // The deletion itself is committed and audited; the leftover bytes are a separate, best-effort
+      // event (durable byte-deletion retries are tracked in #54). Its failure cannot change the outcome.
+      await recordAuditBestEffort(prisma, {
+        action: "FILE_DELETED_METADATA_ONLY",
+        details: file.id,
         userId: request.user.id,
         ip: clientIp(request)
-      }
-    });
+      }, request.log);
+    }
 
     return { message: "File deleted successfully" };
   });

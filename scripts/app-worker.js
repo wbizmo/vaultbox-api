@@ -17,6 +17,9 @@ const app = buildApp({
   config: {
     nodeEnv: "test",
     isProduction: false,
+    // WORKER_TRUST_PROXY (e.g. "loopback") lets a test present a distinct client address per request through
+    // X-Forwarded-For, so rate limits that outlive a test process do not accumulate against 127.0.0.1.
+    trustProxy: process.env.WORKER_TRUST_PROXY ? process.env.WORKER_TRUST_PROXY.split(",") : false,
     corsOrigins: [],
     jwtSecret: process.env.JWT_SECRET,
     jwtExpiresIn: "1h",

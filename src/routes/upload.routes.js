@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const { clientIp } = require("../lib/client-ip");
+const { recordAudit } = require("../lib/audit");
 const { pipeline } = require("stream/promises");
 
 const prisma = require("../lib/prisma");
@@ -178,7 +179,7 @@ async function uploadRoutes(app) {
           throw error;
         }
 
-        return tx.uploadSession.create({
+        const created = await tx.uploadSession.create({
           data: {
             id: sessionId,
             userId: request.user.id,
@@ -191,6 +192,13 @@ async function uploadRoutes(app) {
             expiresAt: new Date(Date.now() + config.uploadSessionExpiresMinutes * 60 * 1000)
           }
         });
+        await recordAudit(tx, {
+          action: "UPLOAD_SESSION_CREATED",
+          details: `${created.id}:${created.expectedSize}`,
+          userId: request.user.id,
+          ip: clientIp(request)
+        });
+        return created;
       });
     } catch (error) {
       await storage.deleteUploadSessionChunks(sessionId).catch(() => {});
@@ -199,15 +207,6 @@ async function uploadRoutes(app) {
       }
       throw error;
     }
-
-    await prisma.auditLog.create({
-      data: {
-        action: "UPLOAD_SESSION_CREATED",
-        details: `${session.id}:${session.originalName}:${session.expectedSize}`,
-        userId: request.user.id,
-        ip: clientIp(request)
-      }
-    });
 
     return reply.code(201).send({
       message: "Upload session created",
@@ -537,6 +536,12 @@ async function uploadRoutes(app) {
           }
         });
         if (completed.count !== 1) throw leaseLostError();
+        await recordAudit(tx, {
+          action: "UPLOAD_SESSION_COMPLETED",
+          details: `${session.id}:${file.id}:${assembled.size}`,
+          userId: request.user.id,
+          ip: clientIp(request)
+        });
         return { file, quota };
       }));
     } catch (error) {
@@ -554,15 +559,6 @@ async function uploadRoutes(app) {
     await storage.deleteUploadSessionChunks(session.id).catch((error) => {
       request.log.warn({ err: error, sessionId: session.id }, "Upload committed but chunk cleanup failed");
     });
-    await prisma.auditLog.create({
-      data: {
-        action: "UPLOAD_SESSION_COMPLETED",
-        details: `${session.id}:${committed.file.id}:${assembled.size}`,
-        userId: request.user.id,
-        ip: clientIp(request)
-      }
-    });
-
     return {
       message: "Upload completed",
       sessionId: session.id,
@@ -603,17 +599,18 @@ async function uploadRoutes(app) {
       return reply.code(409).send({ message: "Upload completion is in progress" });
     }
 
-    const aborted = await releaseSession(session, "ABORTED");
-    if (!aborted) return reply.code(409).send({ message: "Upload session state changed concurrently" });
-    await storage.deleteUploadSessionChunks(session.id).catch(() => {});
-    await prisma.auditLog.create({
-      data: {
+    // The audit event is written in the transaction that performs the abort (only the caller whose
+    // compare-and-set succeeded writes it), so it can neither be missing nor duplicated.
+    const aborted = await releaseSession(session, "ABORTED", prisma, {
+      audit: (tx) => recordAudit(tx, {
         action: "UPLOAD_SESSION_ABORTED",
-        details: `${session.id}:${session.originalName}`,
+        details: session.id,
         userId: request.user.id,
         ip: clientIp(request)
-      }
+      })
     });
+    if (!aborted) return reply.code(409).send({ message: "Upload session state changed concurrently" });
+    await storage.deleteUploadSessionChunks(session.id).catch(() => {});
     return { message: "Upload session aborted" };
   });
 }

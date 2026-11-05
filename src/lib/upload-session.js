@@ -145,7 +145,7 @@ function assertCompleteParts(session, parts) {
   }
 }
 
-async function releaseSession(session, targetStatus, client = prisma) {
+async function releaseSession(session, targetStatus, client = prisma, { audit = null } = {}) {
   return retryOnConflict(() => client.$transaction(async (tx) => {
     await lockUserForUpdate(tx, session.userId);
     const transitioned = await tx.uploadSession.updateMany({
@@ -158,6 +158,7 @@ async function releaseSession(session, targetStatus, client = prisma) {
     });
     if (transitioned.count !== 1) return false;
     await releaseUploadReservation(session.userId, session.expectedSize, tx);
+    if (audit) await audit(tx);
     return true;
   }));
 }

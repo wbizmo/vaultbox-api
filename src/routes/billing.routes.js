@@ -1,5 +1,6 @@
 const prisma = require("../lib/prisma");
 const { clientIp } = require("../lib/client-ip");
+const { recordAudit } = require("../lib/audit");
 const { requireAuth } = require("../middleware/auth");
 const { verifyWebhookSignature, applyBillingEvent } = require("../lib/entitlements");
 
@@ -80,13 +81,11 @@ async function billingRoutes(app) {
         select: { id: true, name: true, email: true, status: true }
       });
 
-      await tx.auditLog.create({
-        data: {
-          action: "PAYMENT_FAILED",
-          details: "Simulated billing failure. Account suspended.",
-          userId: updated.id,
-          ip: clientIp(request)
-        }
+      await recordAudit(tx, {
+        action: "PAYMENT_FAILED",
+        details: "Simulated billing failure. Account suspended.",
+        userId: updated.id,
+        ip: clientIp(request)
       });
 
       return updated;

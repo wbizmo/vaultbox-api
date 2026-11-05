@@ -1,5 +1,6 @@
 const prisma = require("../lib/prisma");
 const { clientIp } = require("../lib/client-ip");
+const { recordAudit } = require("../lib/audit");
 const { requireAuth } = require("../middleware/auth");
 const { storage } = require("../lib/storage");
 const { contentDispositionAttachment } = require("../lib/security");
@@ -171,15 +172,12 @@ async function downloadRoutes(app) {
           expiresAt
         }
       });
-    });
-
-    await prisma.auditLog.create({
-      data: {
+      await recordAudit(tx, {
         action: "DOWNLOAD_SESSION_CREATED",
-        details: `${file.id}:${file.originalName}`,
+        details: file.id,
         userId: request.user.id,
         ip: clientIp(request)
-      }
+      });
     });
 
     return {
