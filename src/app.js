@@ -13,6 +13,7 @@ const { installErrorHandler } = require("./lib/errors");
 const { installRequestMetrics } = require("./lib/metrics");
 const { installSecurityHeaders, redactRequestUrl } = require("./lib/security");
 const { storage } = require("./lib/storage");
+const { clientIp } = require("./lib/client-ip");
 
 const systemRoutes = require("./routes/system.routes");
 const authRoutes = require("./routes/auth.routes");
@@ -31,7 +32,7 @@ function buildApp(options = {}) {
   const storageAdapter = options.storage || storage;
   const app = Fastify({
     logger: options.logger ?? true,
-    trustProxy: config.isProduction,
+    trustProxy: config.trustProxy || false,
     requestIdHeader: "x-request-id",
     logController: new LogController({ disableRequestLogging: true }),
     exposeHeadRoutes: false
@@ -112,7 +113,7 @@ function buildApp(options = {}) {
       requestId: request.id,
       method: request.method,
       url: redactRequestUrl(request.raw.url),
-      ip: request.ip
+      ip: clientIp(request)
     }, "request started");
   });
 

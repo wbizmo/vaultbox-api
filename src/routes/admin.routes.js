@@ -1,4 +1,5 @@
 const prisma = require("../lib/prisma");
+const { clientIp, describeTrustProxy } = require("../lib/client-ip");
 const { requireAuth } = require("../middleware/auth");
 const { requireAdmin } = require("../middleware/admin");
 const { formatBytes } = require("../lib/bytes");
@@ -126,7 +127,7 @@ async function adminRoutes(app) {
         action: "USER_SUSPENDED",
         details: request.body?.reason || `Suspended ${user.email}`,
         userId: request.user.id,
-        ip: request.ip
+        ip: clientIp(request)
       }
     });
 
@@ -149,7 +150,7 @@ async function adminRoutes(app) {
         action: "USER_REACTIVATED",
         details: `Reactivated ${user.email}`,
         userId: request.user.id,
-        ip: request.ip
+        ip: clientIp(request)
       }
     });
 
@@ -174,12 +175,31 @@ async function adminRoutes(app) {
         action: "USER_DELETED",
         details: `Deleted ${user.email}`,
         userId: request.user.id,
-        ip: request.ip
+        ip: clientIp(request)
       }
     });
 
     return { message: "User deleted successfully", user: deletedUser };
   });
+
+  app.get("/admin/network-diagnostics", {
+    preHandler: [requireAuth, requireAdmin],
+    schema: {
+      tags: ["Admin"],
+      summary: "Show how this request's client IP was derived (verify the trusted-proxy setting)",
+      description: "Call it from a client whose address you know. `clientIp` must equal that address and `socketAddress` should be your ingress proxy. If `clientIp` is the proxy's address, TRUST_PROXY does not cover the real ingress; if it ever shows a value you did not send from, the setting is too permissive.",
+      security: [{ bearerAuth: [] }]
+    }
+  }, async (request) => ({
+    trustProxy: {
+      policy: describeTrustProxy(app.vaultboxConfig?.trustProxy),
+      source: app.vaultboxConfig?.trustProxySource || "default"
+    },
+    clientIp: clientIp(request),
+    socketAddress: request.raw.socket?.remoteAddress || null,
+    forwardedFor: request.headers["x-forwarded-for"] || null,
+    chain: request.ips || [clientIp(request)]
+  }));
 
   app.get("/admin/storage-report", {
     preHandler: [requireAuth, requireAdmin],

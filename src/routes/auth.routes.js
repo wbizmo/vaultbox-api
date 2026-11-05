@@ -1,4 +1,5 @@
 const bcrypt = require("bcryptjs");
+const { clientIp } = require("../lib/client-ip");
 const prisma = require("../lib/prisma");
 const { throttlePreHandler } = require("../lib/throttle");
 
@@ -8,7 +9,7 @@ const registerThrottle = throttlePreHandler("register", { limit: 8, windowSecond
 const loginThrottle = throttlePreHandler(
   "login",
   { limit: 10, windowSeconds: 300, policy: "shared" },
-  (request) => `${request.ip}:${normalizeEmail(request.body?.email || "unknown")}`
+  (request) => `${clientIp(request)}:${normalizeEmail(request.body?.email || "unknown")}`
 );
 // Independent global caps: one account cannot be guessed at from many addresses, and one address
 // cannot spray many accounts, even though each (ip, email) pair stays under its own limit.
@@ -20,7 +21,7 @@ const loginAccountThrottle = throttlePreHandler(
 const loginAddressThrottle = throttlePreHandler(
   "login-address",
   { limit: 120, windowSeconds: 300, policy: "shared" },
-  (request) => request.ip
+  (request) => clientIp(request)
 );
 
 function normalizeEmail(email) {
@@ -110,7 +111,7 @@ async function authRoutes(app) {
       data: {
         action: "ACCOUNT_REGISTERED",
         userId: user.id,
-        ip: request.ip
+        ip: clientIp(request)
       }
     });
 
@@ -146,7 +147,7 @@ async function authRoutes(app) {
     if (!passwordMatches) return reply.code(401).send({ message: "Invalid email or password" });
 
     await prisma.auditLog.create({
-      data: { action: "LOGIN", userId: user.id, ip: request.ip }
+      data: { action: "LOGIN", userId: user.id, ip: clientIp(request) }
     });
 
     // Sign with the session version read together with the status we just checked. If the account

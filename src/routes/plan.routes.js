@@ -1,4 +1,5 @@
 const prisma = require("../lib/prisma");
+const { clientIp } = require("../lib/client-ip");
 const { requireAuth } = require("../middleware/auth");
 const { formatBytes } = require("../lib/bytes");
 const { AppError } = require("../lib/errors");
@@ -105,7 +106,7 @@ async function planRoutes(app) {
         action: "PLAN_CHANGED",
         details: `Changed to ${plan.name} plan`,
         userId: request.user.id,
-        ip: request.ip
+        ip: clientIp(request)
       }
     });
 

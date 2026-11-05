@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const { clientIp } = require("../lib/client-ip");
 const { pipeline } = require("stream/promises");
 
 const prisma = require("../lib/prisma");
@@ -232,7 +233,7 @@ async function fileRoutes(app) {
         action: "FILE_UPLOADED",
         details: `${file.id}:${originalName}`,
         userId: user.id,
-        ip: request.ip
+        ip: clientIp(request)
       }
     });
 
@@ -352,7 +353,7 @@ async function fileRoutes(app) {
         action: removed ? "FILE_DELETED" : "FILE_DELETED_METADATA_ONLY",
         details: `${file.id}:${file.originalName}`,
         userId: request.user.id,
-        ip: request.ip
+        ip: clientIp(request)
       }
     });
 

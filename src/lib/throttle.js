@@ -1,4 +1,5 @@
 const crypto = require("node:crypto");
+const { clientIp } = require("./client-ip");
 const { redis } = require("./redis");
 const { key } = require("./cache");
 const prisma = require("./prisma");
@@ -182,9 +183,9 @@ function getThrottleState() {
   };
 }
 
-function throttlePreHandler(namespace, options, identityFactory = (request) => request.ip) {
+function throttlePreHandler(namespace, options, identityFactory = (request) => clientIp(request)) {
   return async function throttle(request, reply) {
-    const identity = String(identityFactory(request) || request.ip);
+    const identity = String(identityFactory(request) || clientIp(request));
     const result = await checkThrottle(namespace, identity, options);
 
     if (result.unavailable) {

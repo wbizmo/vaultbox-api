@@ -35,6 +35,8 @@ At minimum production must provide:
 - `REDIS_URL`
 - `CORS_ORIGINS`
 
+Client-IP derivation is controlled with `TRUST_PROXY` (see [Client IP and trusted proxies](#client-ip-and-trusted-proxies)); it is optional because production has a safe default.
+
 Plan and billing behavior is controlled with (see [Plan entitlements](#plan-entitlements-and-billing-webhook)):
 
 - `PLAN_SWITCH_MODE` — `entitled` (default) or `demo`
@@ -85,6 +87,28 @@ UPDATE "User" SET "role" = 'USER', "authVersion" = "authVersion" + 1 WHERE "emai
 (A role changed without the bump still takes effect immediately, because the role is read from the database on each request, but the account's older tokens stay valid at the new privilege.)
 
 **Cost.** One primary-key lookup per authenticated request, replacing the previous 10-second Redis cache.
+
+## Client IP and trusted proxies
+
+Rate limits, audit-log addresses and request logs all use **one** derived identity (`clientIp(request)`, `src/lib/client-ip.js`). It is computed from the TCP connection and `X-Forwarded-For` according to `TRUST_PROXY`, which names *which peers are your own reverse proxies*. The server walks the address chain from the connection backwards while each address is a trusted proxy and stops at the first address that is not: **that is the client**. Anything a client writes into `X-Forwarded-For` sits further left and is never consulted. The result is always a syntactically valid IP address; a malformed value is replaced by the connection's own address.
+
+| `TRUST_PROXY` | Meaning |
+| --- | --- |
+| unset, `NODE_ENV=production` | `loopback,linklocal,uniquelocal` — peers on private addresses (127/8, 169.254/16, 10/8, 172.16/12, 192.168/16, `fc00::/7`, `::1`, `fe80::/10`) are trusted proxies. A direct connection from a public address is never believed. |
+| unset, any other environment | none: the connection address is the client (predictable for local runs and tests). |
+| `none` | never trust forwarded headers. |
+| list | comma-separated addresses, CIDR ranges and the keywords above, e.g. `10.0.0.0/8,203.0.113.0/24`. |
+| `true`, `all`, `*`, a bare number such as `1`, a `/0` range, an IPv4 range shorter than `/8`, an IPv6 range that contains public internet addresses (the IPv4-mapped `::ffff:0:0/96` in any spelling, `::/1`, `2000::/3`, ...), an empty entry (stray or trailing comma), or anything malformed | **refused at startup.** `true` would make the *leftmost* (client-written) entry the identity; a bare hop count is treated by Fastify 5 as "trust nobody", so it is rejected rather than allowed to mean something unintended. The broad-range rules exist because such a range makes ordinary internet clients "trusted proxies" (verified against Fastify: with `::ffff:0:0/96` a public IPv4 client's forged `X-Forwarded-For` was believed). Private IPv6 ranges such as `fc00::/7` and `fe80::/10` remain valid. |
+
+**Required ingress behavior.** Your edge/load balancer must connect to the app from an address covered by `TRUST_PROXY` and must **append** the address it saw to `X-Forwarded-For` (or overwrite the header). If it forwards a client-supplied header without appending, the client controls the entry that gets used. Do not expose the service directly to the internet on a port that bypasses the proxy.
+
+**Render topology — verify, do not assume.** The repository cannot observe Render's actual hop chain, so the default is the conservative private-network policy: it can never be spoofed from the public side, but if the connection reaching the app is *not* a private address (or an extra edge network sits in front, e.g. a CDN on a custom domain), every client will resolve to the proxy's address and share its rate-limit buckets. After deploying, call `GET /admin/network-diagnostics` (admin token) from a machine whose public address you know:
+
+- `clientIp` equals your address → correct, nothing to do.
+- `clientIp` is the proxy/edge address → add its range to `TRUST_PROXY` (for example `loopback,linklocal,uniquelocal,<edge CIDR>`), redeploy, check again.
+- `clientIp` shows an address that you did not send from → the setting is too permissive; fix it immediately.
+
+`socketAddress`, `forwardedFor` and `chain` in the same response show exactly what was seen. A production start without `TRUST_PROXY` logs a warning pointing to this check. Until the check is done, the per-address login cap (120 / 5 min) may be shared by users behind the same resolved address.
 
 ## Rate limiting and Redis outages
 
