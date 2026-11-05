@@ -10,7 +10,7 @@ const { lockActiveUserShared } = require("../lib/upload-session");
 
 const tokenThrottle = throttlePreHandler(
   "download-token",
-  { limit: 60, windowSeconds: 60 },
+  { limit: 60, windowSeconds: 60, policy: "shared" },
   (request) => request.user?.id || request.ip
 );
 

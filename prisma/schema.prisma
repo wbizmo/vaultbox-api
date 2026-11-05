@@ -266,3 +266,14 @@ model IdempotencyKey {
   @@unique([userId, operation, key])
   @@index([expiresAt])
 }
+
+// Shared fixed-window counter used ONLY when Redis is unavailable, for abuse-sensitive routes
+// (login, registration, download-token issuance): it keeps limits global across replicas.
+// The key is a SHA-256 of namespace+identity, so no email or IP address is stored.
+model RateLimitWindow {
+  key       String   @id
+  count     Int
+  expiresAt DateTime
+
+  @@index([expiresAt])
+}
