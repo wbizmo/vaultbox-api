@@ -2,7 +2,6 @@ const prisma = require("../lib/prisma");
 const { clientIp } = require("../lib/client-ip");
 const { recordAudit } = require("../lib/audit");
 const { requireAuth } = require("../middleware/auth");
-const { storage } = require("../lib/storage");
 const { contentDispositionAttachment } = require("../lib/security");
 const { parseSingleRange, rangeHeader } = require("../lib/range");
 const { createDownloadToken, hashDownloadToken, etagForChecksum } = require("../lib/download-token");
@@ -49,7 +48,7 @@ async function validateDownload(request, reply, checkStorage = false) {
     return null;
   }
 
-  if (checkStorage && !(await storage.existsFile(record.file))) {
+  if (checkStorage && !(await request.server.vaultboxStorage.existsFile(record.file))) {
     reply.code(404).send({ message: "Stored file missing" });
     return null;
   }
@@ -66,7 +65,7 @@ function setDownloadHeaders(reply, file, etag) {
   reply.header("Last-Modified", file.updatedAt.toUTCString());
 }
 
-async function openDownloadStream(reply, file, options) {
+async function openDownloadStream(storage, reply, file, options) {
   try {
     return await storage.openReadStreamForFile(file, options);
   } catch (error) {
@@ -92,6 +91,18 @@ async function recordFirstDownloadOrRelease(record, request, stream) {
   }
 }
 
+/**
+ * Serve (or inspect) a download session.
+ *
+ * Order matters (issue #52 and an error-reply bug found while testing #48):
+ *   1. every refusal -- unknown/expired token, inactive account or file, unsatisfiable range, missing bytes --
+ *      is decided and sent as a JSON error BEFORE any download header exists. Setting the binary Content-Type
+ *      first made Fastify reject the JSON error body, turning a 404/416 into a 500;
+ *   2. only a GET that has opened its stream records the session's first use ("started"): HEAD is metadata
+ *      inspection, so it never sets usedAt and never emits DOWNLOAD_SESSION_STARTED. The compare-and-set in
+ *      recordFirstDownload keeps concurrent first range requests down to exactly one event;
+ *   3. the download headers are set last, then the body (or nothing, for HEAD) is sent.
+ */
 async function serveDownload(request, reply, headOnly = false) {
   const record = await validateDownload(request, reply, headOnly);
   if (!record) return;
@@ -99,7 +110,6 @@ async function serveDownload(request, reply, headOnly = false) {
   const file = record.file;
   const totalSize = BigInt(file.size);
   const etag = etagForChecksum(file.checksum);
-  setDownloadHeaders(reply, file, etag);
 
   const ifRange = request.headers["if-range"];
   const canUseRange = !ifRange || (etag && ifRange === etag);
@@ -114,37 +124,28 @@ async function serveDownload(request, reply, headOnly = false) {
     }
   }
 
+  let stream = null;
+  if (!headOnly) {
+    stream = await openDownloadStream(
+      request.server.vaultboxStorage,
+      reply,
+      file,
+      range ? { start: Number(range.start), end: Number(range.end) } : undefined
+    );
+    if (!stream) return;
+    await recordFirstDownloadOrRelease(record, request, stream);
+  }
+
+  setDownloadHeaders(reply, file, etag);
   if (range) {
     reply.code(206);
     reply.header("Content-Range", rangeHeader(range, totalSize));
     reply.header("Content-Length", range.length.toString());
-
-    if (headOnly) {
-      await recordFirstDownload(record, clientIp(request));
-      return reply.send();
-    }
-
-    const stream = await openDownloadStream(reply, file, {
-      start: Number(range.start),
-      end: Number(range.end)
-    });
-    if (!stream) return;
-
-    await recordFirstDownloadOrRelease(record, request, stream);
-    return reply.send(stream);
+  } else {
+    reply.header("Content-Length", totalSize.toString());
   }
 
-  reply.header("Content-Length", totalSize.toString());
-  if (headOnly) {
-    await recordFirstDownload(record, clientIp(request));
-    return reply.send();
-  }
-
-  const stream = await openDownloadStream(reply, file);
-  if (!stream) return;
-
-  await recordFirstDownloadOrRelease(record, request, stream);
-  return reply.send(stream);
+  return headOnly ? reply.send() : reply.send(stream);
 }
 
 async function downloadRoutes(app) {
