@@ -102,6 +102,7 @@ async function fixture(t, { storageUsed = 0n } = {}) {
     await app.close();
     await prisma.fileDeletion.deleteMany({ where: { userId: user.id } });
     await prisma.auditLog.deleteMany({ where: { userId: user.id } });
+    await prisma.downloadToken.deleteMany({ where: { userId: user.id } });
     await prisma.file.deleteMany({ where: { userId: user.id } });
     await prisma.user.delete({ where: { id: user.id } });
     await prisma.plan.delete({ where: { id: plan.id } });
@@ -452,4 +453,23 @@ test("a failing job-state update is logged with the file id and does not stop th
   assert.equal(f.storage.calls.size, 2, "the second job was still attempted");
   assert.deepEqual(warnings.map((w) => w.details.fileId).sort(), [a.id, b.id].sort());
   assert.match(warnings[0].details.err.message, /database hiccup/);
+});
+
+test("a download session issued before the deletion stops serving the file even while its bytes are still queued for removal", async (t) => {
+  const f = await fixture(t);
+  const bytes = Buffer.from("still on storage for now");
+  const file = await f.createFile(bytes);
+  const earlier = await f.app.inject({ method: "POST", url: `/files/${file.id}/download-token`, headers: f.headers });
+  assert.equal(earlier.statusCode, 200, earlier.body);
+  assert.equal((await f.app.inject({ method: "GET", url: earlier.json().downloadUrl })).statusCode, 200, "serves while the file is active");
+
+  f.storage.failWith = Object.assign(new Error("down"), { code: "EIO" });
+  assert.equal((await f.del(file)).statusCode, 200);
+  assert.equal(await f.exists(file), true, "the bytes are still on storage (cleanup is pending)");
+
+  const stale = await f.app.inject({ method: "GET", url: earlier.json().downloadUrl });
+  assert.equal(stale.statusCode, 404, stale.body);
+  assert.deepEqual(stale.json(), { message: "File no longer exists" });
+  const headStale = await f.app.inject({ method: "HEAD", url: earlier.json().downloadUrl });
+  assert.equal(headStale.statusCode, 404);
 });
