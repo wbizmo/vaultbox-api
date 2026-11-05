@@ -46,7 +46,7 @@ async function lockUser(tx, userId) {
  * so the entitlement read in the UPDATE (a fresh statement snapshot) cannot
  * race a concurrent revocation, which takes the same lock.
  */
-async function switchPlanIfEntitled(userId, planId, client = prisma) {
+async function switchPlanIfEntitled(userId, planId, client = prisma, afterSwitch = null) {
   return client.$transaction(async (tx) => {
     if (!(await lockUser(tx, userId))) return null;
     const rows = await tx.$queryRawUnsafe(`
@@ -68,6 +68,8 @@ async function switchPlanIfEntitled(userId, planId, client = prisma) {
         p."storageLimit" AS "storageLimit",
         p."id" AS "planId"
     `, userId, planId);
+    // Runs in the same transaction as the plan change (used to write the audit event atomically).
+    if (rows[0] && afterSwitch) await afterSwitch(tx, rows[0]);
     return rows[0] || null;
   });
 }

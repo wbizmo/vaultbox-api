@@ -88,6 +88,21 @@ UPDATE "User" SET "role" = 'USER', "authVersion" = "authVersion" + 1 WHERE "emai
 
 **Cost.** One primary-key lookup per authenticated request, replacing the previous 10-second Redis cache.
 
+## Audit events
+
+Each audited state change (the critical events listed below) is written **in the same PostgreSQL transaction as the change** (`src/lib/audit.js`). The two therefore always agree:
+
+- the change commits ⇒ its audit row exists (there is no separate step that can fail after the commit);
+- the audit insert fails ⇒ the whole transaction rolls back, the client receives an error, and nothing happened (no file, quota change, session, account, plan switch or revocation), so a **retry is safe** and the error is never ambiguous. Concurrent duplicate requests emit exactly one event because the compare-and-set that decides who performs the change is in the same transaction.
+
+| Class | Events | If the audit store is unavailable |
+| --- | --- | --- |
+| **Critical, in the change's transaction** | `ACCOUNT_REGISTERED`, `FILE_UPLOADED`, `FILE_DELETED`, `UPLOAD_SESSION_CREATED` / `_COMPLETED` / `_ABORTED`, `DOWNLOAD_SESSION_CREATED`, `DOWNLOAD_SESSION_STARTED` (atomic with the `usedAt` flag), `PLAN_CHANGED`, `USER_SUSPENDED` / `_REACTIVATED` / `_DELETED`, `PAYMENT_FAILED` | the operation fails before commit (500) and leaves no trace |
+| **Critical, no state change** | `LOGIN` | written before any token exists; on failure no token is issued |
+| **Best effort, after the commit** | `FILE_DELETED_METADATA_ONLY` (the stored bytes could not be removed after the deletion committed) | the failure is logged and swallowed; it cannot change the outcome of the already-committed operation |
+
+**Not audited today:** folder writes, upload-session and reservation expiry performed by the background sweeper, and billing-webhook entitlement changes (the webhook's own `BillingEvent` rows are its idempotent record). The guarantee above applies only to the events in the table. The audit table is the durable store and is written atomically, so there is no delivery backlog to drain or monitor; durable retries for removing stored **bytes** are tracked separately (#54). Audit `details` hold identifiers (file, session and user ids) and sizes only, never file names, e-mail addresses or tokens; this is a **change from earlier versions**, which stored file names and e-mail addresses in `details`. Existing rows are not rewritten.
+
 ## Client IP and trusted proxies
 
 Rate limits, audit-log addresses and request logs all use **one** derived identity (`clientIp(request)`, `src/lib/client-ip.js`). It is computed from the TCP connection and `X-Forwarded-For` according to `TRUST_PROXY`, which names *which peers are your own reverse proxies*. The server walks the address chain from the connection backwards while each address is a trusted proxy and stops at the first address that is not: **that is the client**. Anything a client writes into `X-Forwarded-For` sits further left and is never consulted. The result is always a syntactically valid IP address; a malformed value is replaced by the connection's own address.

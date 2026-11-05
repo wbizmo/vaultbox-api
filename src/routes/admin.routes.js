@@ -1,5 +1,6 @@
 const prisma = require("../lib/prisma");
 const { clientIp, describeTrustProxy } = require("../lib/client-ip");
+const { recordAudit } = require("../lib/audit");
 const { requireAuth } = require("../middleware/auth");
 const { requireAdmin } = require("../middleware/admin");
 const { formatBytes } = require("../lib/bytes");
@@ -119,17 +120,19 @@ async function adminRoutes(app) {
 
     // One statement changes the status and bumps the session version: every outstanding token
     // is rejected on the next request on any instance (no cache to invalidate).
-    const updatedUser = await setAccountStatus(id, "SUSPENDED");
-    if (!updatedUser) return reply.code(404).send({ message: "User not found" });
-
-    await prisma.auditLog.create({
-      data: {
+    // Status change, session revocation and audit event commit together.
+    const updatedUser = await prisma.$transaction(async (tx) => {
+      const changed = await setAccountStatus(id, "SUSPENDED", tx);
+      if (!changed) return null;
+      await recordAudit(tx, {
         action: "USER_SUSPENDED",
-        details: request.body?.reason || `Suspended ${user.email}`,
+        details: request.body?.reason ? `${id}: ${request.body.reason}` : `Suspended ${id}`,
         userId: request.user.id,
         ip: clientIp(request)
-      }
+      });
+      return changed;
     });
+    if (!updatedUser) return reply.code(404).send({ message: "User not found" });
 
     return { message: "User suspended successfully", user: updatedUser };
   });
@@ -142,17 +145,18 @@ async function adminRoutes(app) {
     if (!user) return reply.code(404).send({ message: "User not found" });
 
     // Reactivation also bumps the session version, so tokens issued before the suspension stay dead.
-    const updatedUser = await setAccountStatus(user.id, "ACTIVE");
-    if (!updatedUser) return reply.code(404).send({ message: "User not found" });
-
-    await prisma.auditLog.create({
-      data: {
+    const updatedUser = await prisma.$transaction(async (tx) => {
+      const changed = await setAccountStatus(user.id, "ACTIVE", tx);
+      if (!changed) return null;
+      await recordAudit(tx, {
         action: "USER_REACTIVATED",
-        details: `Reactivated ${user.email}`,
+        details: `Reactivated ${user.id}`,
         userId: request.user.id,
         ip: clientIp(request)
-      }
+      });
+      return changed;
     });
+    if (!updatedUser) return reply.code(404).send({ message: "User not found" });
 
     return { message: "User reactivated successfully", user: updatedUser };
   });
@@ -167,17 +171,18 @@ async function adminRoutes(app) {
     const user = await prisma.user.findUnique({ where: { id } });
     if (!user) return reply.code(404).send({ message: "User not found" });
 
-    const deletedUser = await setAccountStatus(id, "DELETED");
-    if (!deletedUser) return reply.code(404).send({ message: "User not found" });
-
-    await prisma.auditLog.create({
-      data: {
+    const deletedUser = await prisma.$transaction(async (tx) => {
+      const changed = await setAccountStatus(id, "DELETED", tx);
+      if (!changed) return null;
+      await recordAudit(tx, {
         action: "USER_DELETED",
-        details: `Deleted ${user.email}`,
+        details: `Deleted ${id}`,
         userId: request.user.id,
         ip: clientIp(request)
-      }
+      });
+      return changed;
     });
+    if (!deletedUser) return reply.code(404).send({ message: "User not found" });
 
     return { message: "User deleted successfully", user: deletedUser };
   });

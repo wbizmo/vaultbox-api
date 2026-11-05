@@ -1,4 +1,5 @@
 const test = require("node:test");
+const { freshAddress } = require("../scripts/test-address");
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const { fork } = require("node:child_process");
@@ -53,7 +54,7 @@ async function fixture(t, { withWorker = false } = {}) {
   let worker = null;
   if (withWorker) {
     worker = fork(path.join(__dirname, "..", "scripts", "app-worker.js"), [], {
-      env: { ...process.env, JWT_SECRET },
+      env: { ...process.env, JWT_SECRET, WORKER_TRUST_PROXY: "loopback" },
       stdio: ["ignore", "ignore", "inherit", "ipc"]
     });
     ({ port } = await new Promise((resolve, reject) => {
@@ -74,7 +75,7 @@ async function fixture(t, { withWorker = false } = {}) {
   const bearer = (token) => ({ authorization: `Bearer ${token}` });
   const login = async (user, target = "A") => {
     if (target === "A") {
-      const res = await app.inject({ method: "POST", url: "/auth/login", payload: { email: user.email, password: PASSWORD } });
+      const res = await app.inject({ method: "POST", url: "/auth/login", remoteAddress: freshAddress(), payload: { email: user.email, password: PASSWORD } });
       assert.equal(res.statusCode, 200, res.body);
       return res.json().token;
     }
@@ -86,7 +87,11 @@ async function fixture(t, { withWorker = false } = {}) {
   const viaB = async (url, token, { method = "GET", body } = {}) => {
     const res = await fetch(`http://127.0.0.1:${port}${url}`, {
       method,
-      headers: { ...(token ? bearer(token) : {}), ...(body ? { "content-type": "application/json" } : {}) },
+      headers: {
+        ...(token ? bearer(token) : {}),
+        ...(body ? { "content-type": "application/json" } : {}),
+        "x-forwarded-for": freshAddress()
+      },
       body: body ? JSON.stringify(body) : undefined
     });
     const text = await res.text();
@@ -177,7 +182,7 @@ test("a login racing a suspension can never leave a reusable credential", async 
   };
   t.after(() => { bcrypt.compare = original; });
 
-  const racing = f.app.inject({ method: "POST", url: "/auth/login", payload: { email: f.alice.email, password: PASSWORD } });
+  const racing = f.app.inject({ method: "POST", url: "/auth/login", remoteAddress: freshAddress(), payload: { email: f.alice.email, password: PASSWORD } });
   await reached;
 
   await f.suspend(f.alice);
@@ -201,7 +206,7 @@ test("a login racing a suspension can never leave a reusable credential", async 
   let releaseAgain;
   const gateAgain = new Promise((resolve) => { releaseAgain = resolve; });
   bcrypt.compare = async (...args) => { enteredAgain(); await gateAgain; return original(...args); };
-  const racing2 = f.app.inject({ method: "POST", url: "/auth/login", payload: { email: f.alice.email, password: PASSWORD } });
+  const racing2 = f.app.inject({ method: "POST", url: "/auth/login", remoteAddress: freshAddress(), payload: { email: f.alice.email, password: PASSWORD } });
   await reachedAgain;
   await f.suspend(f.alice);
   releaseAgain();
@@ -284,6 +289,7 @@ test("status/role changes bump the session version atomically and registration i
   const registered = await f.app.inject({
     method: "POST",
     url: "/auth/register",
+    remoteAddress: freshAddress(),
     payload: { name: "New", email, password: PASSWORD }
   });
   assert.equal(registered.statusCode, 201, registered.body);

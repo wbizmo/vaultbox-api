@@ -19,10 +19,11 @@ const { checkThrottle, getThrottleState, pruneExpiredRateLimitWindows } = requir
 
 const JWT_SECRET = "throttle-degraded-secret-long-enough-for-tests";
 const unique = () => crypto.randomUUID().slice(0, 12);
+const { freshAddress } = require("../scripts/test-address");
 
 function startWorker(t, env) {
   const worker = fork(path.join(__dirname, "..", "scripts", "app-worker.js"), [], {
-    env: { ...process.env, JWT_SECRET, ...env },
+    env: { ...process.env, JWT_SECRET, WORKER_TRUST_PROXY: "loopback", ...env },
     stdio: ["ignore", "ignore", "inherit", "ipc"]
   });
   t.after(() => { if (worker.exitCode === null) worker.kill("SIGKILL"); });
@@ -32,9 +33,11 @@ function startWorker(t, env) {
   });
 }
 
-const login = (port, email) => fetch(`http://127.0.0.1:${port}/auth/login`, {
+// `client` is the end-user address the (trusted, loopback) proxy reports; one fixed address per test keeps
+// the two instances counting the same identity while separate runs never share a counter.
+const login = (port, email, client) => fetch(`http://127.0.0.1:${port}/auth/login`, {
   method: "POST",
-  headers: { "content-type": "application/json" },
+  headers: { "content-type": "application/json", "x-forwarded-for": client },
   body: JSON.stringify({ email, password: "irrelevant-Password-1" })
 });
 
@@ -65,10 +68,11 @@ test("healthy Redis: two separate instances share one limit instead of multiplyi
     startWorker(t, { WORKER_CONNECT_REDIS: "1" })
   ]);
   const email = `healthy-${unique()}@example.com`;
+  const client = freshAddress();
 
   const statuses = [];
   for (let i = 0; i < 14; i += 1) {
-    const response = await login(ports[i % 2], email);
+    const response = await login(ports[i % 2], email, client);
     statuses.push(response.status);
     if (response.status === 429) assert.ok(Number(response.headers.get("retry-after")) > 0);
   }
@@ -83,15 +87,16 @@ test("Redis unavailable on both instances: the sensitive limit is still global (
     startWorker(t, { REDIS_URL: "" })
   ]);
   const email = `noredis-${unique()}@example.com`;
+  const client = freshAddress();
 
   const statuses = [];
-  for (let i = 0; i < 14; i += 1) statuses.push((await login(ports[i % 2], email)).status);
+  for (let i = 0; i < 14; i += 1) statuses.push((await login(ports[i % 2], email, client)).status);
   assert.equal(statuses.filter((status) => status === 401).length, 10, statuses.join(","));
   assert.equal(statuses.filter((status) => status === 429).length, 4, statuses.join(","));
 
   const rows = await prisma.$queryRaw`SELECT "key", "count" FROM "RateLimitWindow" WHERE "key" LIKE 'login:%' OR "key" LIKE 'login-account:%'`;
   assert.ok(rows.length >= 1);
-  for (const row of rows) assert.ok(!String(row.key).includes(email) && !String(row.key).includes("127.0.0.1"), "keys are hashed");
+  for (const row of rows) assert.ok(!String(row.key).includes(email) && !String(row.key).includes(client), "keys are hashed");
   await prisma.$executeRaw`DELETE FROM "RateLimitWindow" WHERE "key" LIKE 'login%'`;
 });
 
