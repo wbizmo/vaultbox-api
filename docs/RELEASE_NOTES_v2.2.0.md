@@ -49,7 +49,7 @@ Phase 1 of the v2.5.0 program (issues #39–#52). Security and correctness harde
 
 ## Rollback
 
-Leave the migrations in place: older builds ignore the new tables and columns. Do **not** roll back to a build with Node.js `24.19.0`. Builds before this release lack the entitlement check (paid plans become self-selectable again), the commit-time account fence and the DB-authoritative authentication; roll back only if you accept that, otherwise fix forward.
+Leave the migrations in place: older builds ignore the new tables and columns. Do **not** roll back to a build with Node.js `24.19.0`. Builds before this release lack the entitlement check (paid plans become self-selectable again), the commit-time account fence, the DB-authoritative authentication and download-session revocation (a URL revoked under v2.2.0 works again until it expires, `DOWNLOAD_TOKEN_EXPIRES_MINUTES`, default 15, for as long as the older build runs); roll back only if you accept that, otherwise fix forward.
 
 ## Verification
 
