@@ -99,6 +99,47 @@ test("HEAD (plain and ranged) inspects metadata and never starts the session", a
   assert.equal(await f.started(), 1);
 });
 
+test("first-use state and audit attribution are per session and per user (token-only requests, no bearer auth)", async (t) => {
+  const a = await fixture(t);
+  const b = await fixture(t);
+  const sessionA = await a.newSession();
+  const sessionB = await b.newSession();
+  const startedFor = (user) => prisma.auditLog.findMany({
+    where: { action: "DOWNLOAD_SESSION_STARTED", userId: user.id },
+    select: { userId: true, details: true }
+  });
+
+  // Nothing here carries an Authorization header: the token alone identifies the session and its owner.
+  const firstA = await a.app.inject({ method: "GET", url: sessionA.url });
+  assert.equal(firstA.statusCode, 200);
+  assert.ok((await a.state(sessionA)).usedAt, "A's session is started");
+  assert.equal((await b.state(sessionB)).usedAt, null, "A's download did not touch B's session");
+  assert.equal((await startedFor(b.user)).length, 0, "and produced no event for B");
+  assert.equal((await startedFor(a.user)).length, 1);
+
+  // B's own token starts only B's session and is attributed to B.
+  const firstB = await b.app.inject({ method: "GET", url: sessionB.url });
+  assert.equal(firstB.statusCode, 200);
+  assert.ok((await b.state(sessionB)).usedAt);
+  const eventsA = await startedFor(a.user);
+  const eventsB = await startedFor(b.user);
+  assert.equal(eventsA.length, 1, "A still has exactly one start");
+  assert.equal(eventsB.length, 1, "B has exactly one start");
+  assert.equal(eventsA[0].userId, a.user.id);
+  assert.equal(eventsB[0].userId, b.user.id);
+  assert.equal(eventsA[0].details, a.file.id);
+  assert.equal(eventsB[0].details, b.file.id, "each event names its own file, never a file name");
+
+  // Repeats and HEADs on either session add nothing for anyone.
+  await Promise.all([
+    a.app.inject({ method: "GET", url: sessionA.url }),
+    b.app.inject({ method: "HEAD", url: sessionB.url }),
+    b.app.inject({ method: "GET", url: sessionB.url })
+  ]);
+  assert.equal((await startedFor(a.user)).length, 1);
+  assert.equal((await startedFor(b.user)).length, 1);
+});
+
 test("parallel first range GETs emit exactly one start and return the right bytes", async (t) => {
   const f = await fixture(t);
   const session = await f.newSession();
