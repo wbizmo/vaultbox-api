@@ -1,12 +1,12 @@
 {
   "name": "vaultbox-api",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "vaultbox-api",
-      "version": "2.1.1",
+      "version": "2.2.0",
       "license": "MIT",
       "dependencies": {
         "@fastify/cors": "^11.2.0",
