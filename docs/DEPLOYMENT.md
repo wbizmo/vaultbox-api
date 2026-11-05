@@ -9,6 +9,7 @@ Render tracks the repository `main` branch with auto-deploy enabled.
 The service start command is `npm start`. In v2.1.x that script deliberately performs:
 
 ```text
+prisma generate
 prisma migrate deploy
 node src/server.js
 ```
@@ -61,7 +62,7 @@ Upload/download controls can be tuned with:
 
 **Rolling deploys and rollbacks.** The guarantee holds on an instance only while it runs this release, and for the whole fleet only once **every** instance does. During the overlap an old-build instance never reads `authVersion`: a session revoked with `revokeSessions`, or a suspension that is later reversed by reactivation, can still succeed there until the token's own JWT expiry, and a login served by an old-build instance after a version bump issues a token with no `av` claim that new instances reject with `401` (the user simply signs in again once the rollout is done). So: finish the rollout before revoking sessions or reactivating accounts. Rolling the application back to a build from before this release disables `authVersion` enforcement on those instances until they are replaced; the additive column itself is safe to leave in place. `npm start` regenerates the Prisma client before migrating, so a cached `node_modules` cannot keep a client that predates `authVersion`.
 
-**How tokens are bound.** Every JWT carries the session version it was issued under (claim `av`). Suspending, reactivating, deleting or changing the role of an account increments `authVersion` in the same statement as the change, so all tokens issued earlier are rejected with `401 Session is no longer valid` — including after reactivation or demotion: affected users must sign in again. A login that races a suspension signs the version it read together with the status it checked, so the token it mints is already stale if the account changed in between. Tokens issued before this release have no claim and are treated as version 0, so existing sessions keep working until the account is revoked. JWT expiry is unchanged.
+**How tokens are bound.** Every JWT carries the session version it was issued under (claim `av`). Suspending, reactivating, deleting or changing the role of an account increments `authVersion` in the same statement as the change, so all tokens issued earlier are rejected — including after reactivation or demotion: affected users must sign in again. A login that races a suspension signs the version it read together with the status it checked, so the token it mints is already stale if the account changed in between. Tokens issued before this release have no claim and are treated as version 0, so existing sessions keep working until the account is revoked. JWT expiry is unchanged. Order of checks: a suspended or deleted account always gets `403 Account is suspended|deleted` (the state is checked first); `401 Session is no longer valid` applies to an *active* account whose token carries a stale session version.
 
 **Changing roles or revoking sessions by hand.** Use `src/lib/account.js` (`setAccountStatus`, `setAccountRole`, `revokeSessions`) or, in SQL, bump the version with the change so existing tokens die:
 

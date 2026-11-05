@@ -137,7 +137,7 @@ Render / Fastify API
   |      idempotency keys
   |
   +--> Upstash Redis
-  |      short-lived auth cache, throttling
+  |      throttling (authentication reads PostgreSQL, no cache)
   |
   +--> Storage adapter
          current provider: Render-local filesystem
@@ -273,6 +273,7 @@ Render tracks `main` with auto-deploy enabled. The production start contract is 
 
 ```text
 npm start
+  -> prisma generate
   -> prisma migrate deploy
   -> node src/server.js
 ```
