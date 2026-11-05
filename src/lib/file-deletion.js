@@ -112,15 +112,15 @@ async function processFileDeletions(storage, overrides = {}, client = prisma) {
   });
   const rows = await claimFileDeletions({ limit: options.batchSize, leaseMs: options.leaseMs, fileId: options.fileId || null }, client);
   const outcome = { claimed: rows.length, done: 0, retry: 0, dead: 0 };
-  for (const row of rows) {
-    const result = await finishOne(storage, row, options, client).catch((error) => {
-      // The job-state update itself failed (database trouble): the row stays claimed until its lease lapses
-      // and is retried then. Record why, and carry on with the rest of the batch.
-      options.log?.warn({ err: error, fileId: row.fileId }, "File deletion job state update failed");
-      return "retry";
-    });
-    outcome[result] += 1;
-  }
+  // Every claimed row holds a lease from the moment it was claimed, so start them all at once (the batch is
+  // bounded): a slow storage call must not run the clock down on the rows queued behind it.
+  const results = await Promise.all(rows.map((row) => finishOne(storage, row, options, client).catch((error) => {
+    // The job-state update itself failed (database trouble): the row stays claimed until its lease lapses
+    // and is retried then. Record why, and carry on with the rest of the batch.
+    options.log?.warn({ err: error, fileId: row.fileId }, "File deletion job state update failed");
+    return "retry";
+  })));
+  for (const result of results) outcome[result] += 1;
   return outcome;
 }
 

@@ -473,3 +473,32 @@ test("a download session issued before the deletion stops serving the file even 
   const headStale = await f.app.inject({ method: "HEAD", url: earlier.json().downloadUrl });
   assert.equal(headStale.statusCode, 404);
 });
+
+test("one slow storage call does not hold back the other claimed jobs in the batch", async (t) => {
+  const f = await fixture(t);
+  const slow = await f.createFile();
+  const quick = await f.createFile();
+  f.storage.failWith = Object.assign(new Error("down"), { code: "EIO" });
+  await f.del(slow);
+  await f.del(quick);
+  f.storage.failWith = null;
+  await f.makeDue(slow);
+  await f.makeDue(quick);
+  f.storage.calls.clear();
+
+  // The first object's removal hangs until released; the second must still be attempted while it hangs.
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const original = f.storage.deleteFile.bind(f.storage);
+  f.storage.deleteFile = async (file) => {
+    if (file.storedName === slow.storedName) await gate;
+    return original(file);
+  };
+  const running = processFileDeletions(f.storage, {});
+  const quickDone = await waitFor(async () => !(await f.exists(quick)));
+  assert.equal(quickDone, true, "the second job ran while the first was still in flight");
+  release();
+  const outcome = await running;
+  assert.equal(outcome.done, 2);
+  assert.equal(await f.exists(slow), false);
+});
