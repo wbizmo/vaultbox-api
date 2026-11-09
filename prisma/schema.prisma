@@ -125,6 +125,7 @@ model File {
   @@index([userId, status, size, id])
   @@index([userId, status, originalName, id])
   @@index([folderId])
+  @@index([userId, status, folderId, createdAt, id])
 }
 
 model DownloadToken {
@@ -152,6 +153,7 @@ model UploadSession {
   mimeType             String
   expectedSize         BigInt
   expectedChecksum     String?
+  folderId             String?
   chunkSize            Int
   partCount            Int
   status               UploadSessionStatus @default(UPLOADING)

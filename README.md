@@ -51,7 +51,7 @@ Large or interruption-prone uploads use a durable PostgreSQL-backed session prot
 
 1. `POST /upload-sessions` — create a session and atomically reserve the expected bytes.
 2. `PUT /upload-sessions/:id/parts/:partNumber` — stream one bounded part with exact `Content-Range` geometry and optional `x-chunk-sha256`.
-3. `GET /upload-sessions/:id` — inspect uploaded and missing parts.
+3. `GET /upload-sessions/:id` — inspect uploaded and missing parts; optional `view=summary` or `view=page&limit=100&afterPart=-1` bounds responses for up to 10,000 parts.
 4. `POST /upload-sessions/:id/complete` — claim completion, stream deterministic assembly, verify final size/checksum, create one file, and convert reserved quota exactly once.
 5. `DELETE /upload-sessions/:id` — abort, remove temporary bytes, and release the reservation.
 
@@ -171,7 +171,7 @@ The upload-session/part model maps naturally to future multipart object-storage 
 ### Plans and quota
 
 - `GET /plans`
-- `GET /quota`
+- `GET /quota` — committed `storageUsed`/`usagePercent` remain backward compatible; `reservedUploadBytes`, `committedStorageUsed`, `totalAllocatedBytes`, and `allocatedUsagePercent` distinguish pending uploads. `availableBytes = max(storageLimit - storageUsed - reservedUploadBytes, 0)` is remaining immediately admissible capacity. Byte counts are decimal strings for BigInt precision.
 - `PATCH /plans/:planId/subscribe` — free plans are self-service; **paid plans (`priceMonthly > 0`) require a server-side entitlement** (see [Plan entitlements](./docs/DEPLOYMENT.md#plan-entitlements-and-billing-webhook)). Without one the route returns `403`.
 - `POST /billing/webhook` — HMAC-signed, idempotent `entitlement.granted` / `entitlement.revoked` events (no bearer token).
 
@@ -295,3 +295,7 @@ See [`CHANGELOG.md`](./CHANGELOG.md) and the versioned release notes in [`docs/`
 ## License
 
 MIT
+
+### Folder-aware files (v2.5.0 draft)
+
+One-shot uploads accept an optional `x-folder-id` header. Resumable session creation accepts an optional `folderId` field; completion commits to the latest valid folder or root. `PATCH /files/:id` with `{ "folderId": "owned-folder-id" }` moves a file, or `{ "folderId": null }` moves it to root without changing bytes or quota. `GET /files?folderId=<id>` filters to a folder and `GET /files?folderId=root` filters to root, including cursor pagination. Cross-tenant folder/file IDs are rejected with 404. Folder deletion detaches contained files and pending resumable uploads in a transaction.

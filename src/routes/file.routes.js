@@ -20,6 +20,7 @@ const {
   releaseReservation
 } = require("../lib/upload-reservation");
 const { lockActiveUserForUpdate } = require("../lib/upload-session");
+const { assertOwnedFolderLocked } = require("../lib/folder-ownership");
 const { retryOnConflict } = require("../lib/db-retry");
 const { decodeCursor, cursorWhere, cursorOrderBy, finishCursorPage } = require("../lib/pagination");
 
@@ -85,7 +86,8 @@ async function fileRoutes(app) {
             type: "string",
             pattern: "^[0-9]+$",
             description: "Optional exact file byte count. When supplied, VaultBox reserves quota before reading the multipart file body."
-          }
+          },
+          "x-folder-id": { type: "string", minLength: 1, maxLength: 255, description: "Optional owned destination folder ID; validated transactionally at commit." }
         }
       }
     }
@@ -97,6 +99,13 @@ async function fileRoutes(app) {
 
     if (!user?.plan) {
       return reply.code(403).send({ message: "No active storage plan found" });
+    }
+
+    const folderId = request.headers["x-folder-id"] === undefined
+      ? null
+      : String(request.headers["x-folder-id"]);
+    if (folderId !== null && (!folderId.trim() || folderId.length > 255)) {
+      return reply.code(400).send({ message: "x-folder-id must identify a folder" });
     }
 
     const expectedSize = declaredUploadSize(request, app.vaultboxConfig.maxUploadBytes);
@@ -201,8 +210,10 @@ async function fileRoutes(app) {
           throw quotaError;
         }
 
+        await assertOwnedFolderLocked(tx, user.id, folderId);
         const created = await tx.file.create({
           data: {
+            folderId,
             originalName,
             storedName,
             mimeType,
@@ -280,6 +291,7 @@ async function fileRoutes(app) {
           cursor: { type: "string", maxLength: 1024 },
           limit: { type: "integer", minimum: 1, maximum: 100 },
           search: { type: "string", maxLength: 120 },
+          folderId: { type: "string", minLength: 1, maxLength: 255, description: "Owned folder ID or root for files without a folder" },
           sort: { type: "string", enum: ["createdAt", "updatedAt", "size", "originalName"] },
           order: { type: "string", enum: ["asc", "desc"] }
         }
@@ -295,6 +307,7 @@ async function fileRoutes(app) {
     const baseWhere = {
       userId: request.user.id,
       status: "ACTIVE",
+      ...(request.query.folderId === undefined ? {} : { folderId: request.query.folderId === "root" ? null : request.query.folderId }),
       ...(search ? { originalName: { contains: search, mode: "insensitive" } } : {})
     };
 
@@ -342,6 +355,45 @@ async function fileRoutes(app) {
         pages: Math.max(1, Math.ceil(total / limit))
       }
     };
+  });
+
+  app.patch("/files/:id", {
+    onRequest: requireAuth,
+    schema: {
+      tags: ["Files"],
+      summary: "Move an owned file to an owned folder or root without changing its bytes or quota",
+      security: [{ bearerAuth: [] }],
+      body: {
+        type: "object",
+        additionalProperties: false,
+        required: ["folderId"],
+        properties: {
+          folderId: { anyOf: [{ type: "string", minLength: 1, maxLength: 255 }, { type: "null" }] }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    const folderId = request.body.folderId;
+    const moved = await retryOnConflict(() => prisma.$transaction(async (tx) => {
+      await lockActiveUserForUpdate(tx, request.user.id);
+      await assertOwnedFolderLocked(tx, request.user.id, folderId);
+      // An atomic owner/status predicate also fences a concurrent file deletion.
+      const updated = await tx.file.updateMany({
+        where: { id: request.params.id, userId: request.user.id, status: "ACTIVE" },
+        data: { folderId }
+      });
+      if (updated.count !== 1) return null;
+      const file = await tx.file.findUnique({ where: { id: request.params.id } });
+      await recordAudit(tx, {
+        action: "FILE_MOVED",
+        details: file.id + ":" + (folderId ?? "root"),
+        userId: request.user.id,
+        ip: clientIp(request)
+      });
+      return file;
+    }));
+    if (!moved) return reply.code(404).send({ message: "File not found" });
+    return { message: "File moved successfully", file: serializeFile(moved) };
   });
 
   app.delete("/files/:id", {

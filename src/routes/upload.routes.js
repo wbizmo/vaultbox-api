@@ -27,6 +27,7 @@ const {
   cleanupUploadSessions
 } = require("../lib/upload-session");
 const { retryOnConflict } = require("../lib/db-retry");
+const { assertOwnedFolderLocked } = require("../lib/folder-ownership");
 const { throttlePreHandler } = require("../lib/throttle");
 
 const createThrottle = throttlePreHandler(
@@ -63,7 +64,7 @@ function serializePart(part) {
   };
 }
 
-function serializeSession(session, parts = session.parts || []) {
+function serializeSessionBase(session) {
   return {
     id: session.id,
     status: session.status,
@@ -71,13 +72,20 @@ function serializeSession(session, parts = session.parts || []) {
     mimeType: session.mimeType,
     expectedSize: session.expectedSize.toString(),
     expectedChecksum: session.expectedChecksum,
+    folderId: session.folderId ?? null,
     chunkSize: session.chunkSize,
     partCount: session.partCount,
-    uploadedParts: parts.map(serializePart),
-    missingParts: missingPartNumbers(session.partCount, parts),
     expiresAt: session.expiresAt,
     fileId: session.fileId,
     completedAt: session.completedAt
+  };
+}
+
+function serializeSession(session, parts = session.parts || []) {
+  return {
+    ...serializeSessionBase(session),
+    uploadedParts: parts.map(serializePart),
+    missingParts: missingPartNumbers(session.partCount, parts)
   };
 }
 
@@ -140,7 +148,8 @@ async function uploadRoutes(app) {
           originalName: { type: "string", minLength: 1, maxLength: 255 },
           mimeType: { type: "string", minLength: 1, maxLength: 255 },
           expectedSize: { type: "integer", minimum: 1, maximum: config.maxUploadBytes },
-          checksum: { type: "string", minLength: 64, maxLength: 64 }
+          checksum: { type: "string", minLength: 64, maxLength: 64 },
+          folderId: { type: "string", minLength: 1, maxLength: 255, description: "Optional owned target folder" }
         }
       }
     }
@@ -172,6 +181,7 @@ async function uploadRoutes(app) {
     try {
       session = await prisma.$transaction(async (tx) => {
         await lockActiveUserForUpdate(tx, request.user.id);
+        await assertOwnedFolderLocked(tx, request.user.id, request.body.folderId);
         const reservation = await reservePendingUploadQuota(request.user.id, expectedSize, tx);
         if (!reservation) {
           const error = new Error("Storage quota exceeded");
@@ -187,6 +197,7 @@ async function uploadRoutes(app) {
             mimeType: request.body.mimeType.trim().slice(0, 255),
             expectedSize,
             expectedChecksum,
+            folderId: request.body.folderId || null,
             chunkSize,
             partCount,
             expiresAt: new Date(Date.now() + config.uploadSessionExpiresMinutes * 60 * 1000)
@@ -224,18 +235,68 @@ async function uploadRoutes(app) {
     preHandler: requireAuth,
     schema: {
       tags: ["Files"],
-      summary: "Inspect resumable upload progress",
-      security: [{ bearerAuth: [] }]
+      summary: "Inspect resumable upload progress, optionally as a bounded page or summary",
+      description: "Default view=legacy preserves uploadedParts and missingParts arrays. view=summary returns counts without a manifest; view=page returns up to 100 uploaded parts with an exclusive afterPart cursor. Completion validates the authoritative full manifest regardless of this response.",
+      security: [{ bearerAuth: [] }],
+      querystring: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          view: { type: "string", enum: ["legacy", "summary", "page"] },
+          afterPart: { type: "integer", minimum: -1, maximum: 10000 },
+          limit: { type: "integer", minimum: 1, maximum: 100 }
+        }
+      }
     }
   }, async (request, reply) => {
-    let session = await loadOwnedSession(request.user.id, request.params.id, true);
+    const view = request.query.view || "legacy";
+    let session = await loadOwnedSession(request.user.id, request.params.id, view === "legacy");
     if (!session) return reply.code(404).send({ message: "Upload session not found" });
 
     if (await expireIfNeeded(session, storage)) {
-      session = await loadOwnedSession(request.user.id, request.params.id, true);
+      session = await loadOwnedSession(request.user.id, request.params.id, view === "legacy");
     }
+    if (!session) return reply.code(404).send({ message: "Upload session not found" });
+    if (view === "legacy") return { session: serializeSession(session, session.parts) };
 
-    return { session: serializeSession(session, session.parts) };
+    const afterPart = request.query.afterPart ?? -1;
+    const limit = request.query.limit ?? 100;
+
+    // One repeatable-read snapshot keeps the session status, counts and page mutually consistent.
+    // The indexed (sessionId, partNumber) keyset bounds SQL rows and response size at 101.
+    const progress = await prisma.$transaction(async (tx) => {
+      const current = await tx.uploadSession.findFirst({
+        where: { id: request.params.id, userId: request.user.id }
+      });
+      if (!current) return null;
+      const uploadedCount = await tx.uploadPart.count({ where: { sessionId: current.id } });
+      const base = {
+        ...serializeSessionBase(current),
+        uploadedCount,
+        missingCount: Math.max(0, current.partCount - uploadedCount)
+      };
+      if (view === "summary") return base;
+
+      const rows = await tx.uploadPart.findMany({
+        where: { sessionId: current.id, partNumber: { gt: afterPart } },
+        orderBy: { partNumber: "asc" },
+        take: limit + 1
+      });
+      const hasMore = rows.length > limit;
+      const page = rows.slice(0, limit);
+      return {
+        ...base,
+        uploadedParts: page.map(serializePart),
+        partsPage: {
+          afterPart,
+          limit,
+          hasMore,
+          nextAfterPart: hasMore ? page[page.length - 1].partNumber : null
+        }
+      };
+    }, { isolationLevel: "RepeatableRead" });
+    if (!progress) return reply.code(404).send({ message: "Upload session not found" });
+    return { session: progress };
   });
 
   app.put("/upload-sessions/:id/parts/:partNumber", {
@@ -502,9 +563,10 @@ async function uploadRoutes(app) {
         await lockActiveUserForUpdate(tx, request.user.id);
         const owned = await tx.uploadSession.findFirst({
           where: { id: session.id, userId: request.user.id, status: "COMPLETING", completionToken: token },
-          select: { id: true }
+          select: { id: true, folderId: true }
         });
         if (!owned) throw leaseLostError();
+        await assertOwnedFolderLocked(tx, request.user.id, owned.folderId);
 
         const quota = await commitUploadReservation(request.user.id, session.expectedSize, tx);
         if (!quota) {
@@ -521,6 +583,7 @@ async function uploadRoutes(app) {
             size: assembled.size,
             path: storedName,
             checksum: assembled.checksum,
+            folderId: owned.folderId,
             userId: request.user.id
           }
         });

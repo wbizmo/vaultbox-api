@@ -93,7 +93,9 @@ The database uniqueness constraint on `(sessionId, partNumber)` prevents duplica
 
 ### 3. Inspect and resume
 
-`GET /upload-sessions/:id` reports uploaded and missing part numbers. After interruption, clients resend only missing parts rather than retransmitting the complete file.
+`GET /upload-sessions/:id` (default `view=legacy`) reports uploaded and missing part numbers. After interruption, clients resend only missing parts rather than retransmitting the complete file.
+
+For large uploads, use `GET /upload-sessions/:id?view=summary` for `uploadedCount` and `missingCount` without allocating a manifest. Use `?view=page&limit=100&afterPart=-1` for bounded, indexed pages of uploaded parts; advance the exclusive cursor using `partsPage.nextAfterPart` while `hasMore` is true. Each page is a consistent snapshot limited to 100 entries. New concurrent uploads may appear in later polls; completion always revalidates the authoritative database manifest. The default legacy response remains unchanged.
 
 ### 4. Complete
 
@@ -162,3 +164,7 @@ Completion re-reads the part set after claiming the session and asserts it compl
 ## Storage-adapter boundary
 
 The current deployed adapter stores final and temporary bytes on Render-local storage. The upload-session/part model is intentionally compatible with a future multipart object-storage adapter so the public protocol can remain stable when the byte-storage provider changes.
+
+### Optional folder destination (draft #64)
+
+An owned folder can be supplied at upload start (`x-folder-id` header for `POST /files/upload`, `folderId` JSON field for `POST /upload-sessions`). All ownership checks occur inside the transaction recording the file or session. When the destination folder is deleted while a resumable upload is pending, the session is retargeted to root; its eventual completion never writes a dangling folder reference. `PATCH /files/:id` accepts `folderId` to move an already stored file, including `null` for root. File moves never change quotas or object bytes.
