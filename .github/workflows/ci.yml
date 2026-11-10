@@ -2,16 +2,18 @@ name: VaultBox CI
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches:
       - main
-      - feat/vaultbox-v2-transfer-engine
 
 permissions:
   contents: read
 
 jobs:
   verify:
+    # Draft PR checkpoints are validated in the local VM, not billed GitHub runners.
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 10
     services:

@@ -5,13 +5,14 @@
   "main": "src/server.js",
   "scripts": {
     "dev": "nodemon src/server.js",
-    "start": "npx --yes prisma@6.12.0 generate && npx --yes prisma@6.12.0 migrate deploy && node src/server.js",
+    "start": "node src/server.js",
     "build": "echo build skipped",
     "lint": "npx --yes eslint@10.10.0 src scripts test prisma",
     "test": "node --test --test-concurrency=1",
     "benchmark": "node scripts/benchmark.js",
-    "deploy:migrate": "npx prisma migrate deploy",
-    "seed": "node prisma/seed.js"
+    "deploy:migrate": "prisma migrate deploy",
+    "seed": "node prisma/seed.js",
+    "deploy:generate": "prisma generate"
   },
   "keywords": [
     "cloud-storage",
@@ -49,10 +50,10 @@
     "bcryptjs": "^3.0.3",
     "dotenv": "^17.4.2",
     "fastify": "^5.12.1",
+    "prisma": "6.12.0",
     "redis": "^6.2.1"
   },
   "devDependencies": {
-    "nodemon": "^3.1.14",
-    "prisma": "6.12.0"
+    "nodemon": "^3.1.14"
   }
 }

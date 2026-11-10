@@ -6,17 +6,11 @@ VaultBox v2.2.0 targets deployment on **Render + Neon PostgreSQL + Upstash Redis
 
 Render tracks the repository `main` branch with auto-deploy enabled.
 
-The service start command is `npm start`. In v2.1.x that script deliberately performs:
+**Draft v2.5 operational cutover (#62):** `npm start` now runs **only** `node src/server.js`. It never invokes `npx`, downloads an executable, generates Prisma Client, or migrates a database. The installed `prisma@6.12.0` executable is a pinned production dependency. A production build must run `npm ci --omit=dev && npm run deploy:generate`, and a separate, approved migration stage must run `npm run deploy:migrate` before the app is promoted. Do not merge this PR until Render's build/migration commands are changed and verified on a staging clone.
 
-```text
-prisma generate
-prisma migrate deploy
-node src/server.js
-```
+**Current deployed v2.2.0 behavior differs.** Its legacy `npm start` generates Prisma and applies migrations before listening, because the existing free-tier Render build command installs production modules without applying migrations. Do not update Render production settings prematurely; old deployments must stay working while the new process is rehearsed.
 
-The API therefore does not bind its public port until committed Prisma migrations have been applied to Neon.
-
-This is important because the existing Render build command installs production dependencies but does not itself run `prisma migrate deploy`.
+If the Render plan does not support pre-deploy commands, use an independently scheduled, CI-verified one-off migration job with the lockfile-pinned CLI, then promote the already-generated application. Never silently fall back to applying migrations in every API replica's `npm start`. The migration runner and deployment must be serialized and use a PostgreSQL migration lock, preserving compatible additive schema changes. Use `npm_config_offline=true npm start` as the final cold-start check after the prepared build and migrations: no package-registry access may be required.
 
 ## Node.js runtime
 
@@ -342,3 +336,11 @@ node scripts/migrate-local-to-s3.js --verify-only --limit=500
 The tool rejects active upload sessions, pending quota reservations and unfinished/dead byte-deletion outbox entries, and never overwrites existing S3 keys, deletes original bytes or mutates the File table. Existing S3 objects are rehashed before accepting resumed runs. It processes keyset-ordered, bounded file pages. Use `--user-id=<id>` for an authorized per-user migration; still freeze all writes globally. Ensure **all** active File rows are copied and verified before setting `STORAGE_BACKEND=s3`; test upload from one replica and download/range/HEAD from a second replica, delete/retry and restart. Confirm no unmatched objects or unsettled reservations. Preserve the local backup until the S3 deployment has passed smoke tests and the rollback window closes.
 
 **Rollback:** before new S3 writes, restore the old runtime and `STORAGE_BACKEND=local` with the untouched local filesystem and database snapshot. Once new files have been written to S3, switching back without a reverse verified copy would lose user data; freeze writes and explicitly copy/checksum the new objects back, then restore a compatible database state. Never delete source data during a rollback. For provider portability, exercise the optional `VAULTBOX_S3_TEST_ENDPOINT` integration tests against a disposable compatible endpoint with controlled credentials; no test credentials or test-only emulator are part of the production image.
+
+### Explicit release promotion (draft #62)
+
+Release publishing no longer runs automatically after any push or successful CI. Only a deliberate GitHub Actions `workflow_dispatch` invocation of `.github/workflows/release-v2.yml` with an exact **stable version** and **full SHA** can publish. The workflow requires a completed, successful **push CI on protected main at exactly that SHA**, a matching `package.json` version, matching release notes and title, and the same current main HEAD at the moment of publication. It refuses divergent tags or existing releases, runs under a single concurrency group, uses minimal token permissions and a `vaultbox-release` approval environment.
+
+Before enabling the workflow, configure **required human reviewers for the `vaultbox-release` environment** in GitHub repository settings; YAML declaring an environment alone does not enforce reviewers. Keep `main` branch protection and the `VaultBox CI` required check enabled. Draft PR checks are skipped to avoid using GitHub Actions as a debugger; maintain the exact local Node/Postgres/Redis verification transcript and artifacts for each checkpoint, then mark the PR ready only after all acceptance criteria and full CI pass. Do not publish v2.5.0 or merge this draft until the user explicitly approves the release.
+
+Rollback runbook: freeze writes, take a PostgreSQL and object-store snapshot, confirm migrations are additive and backward-compatible, migrate the staging clone first, compare authenticated health, file writes/reads and folder/listing APIs, then promote the precise verified commit. If acceptance fails, revert the application to the previous known-good SHA while leaving compatible additive columns in place; restore DB/object backups only if an incompatible data conversion occurred. A reverse migration must never delete data generated under the newer code without an independently validated export.

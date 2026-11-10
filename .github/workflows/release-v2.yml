@@ -1,58 +1,91 @@
-name: Publish release
+name: Publish release (explicit approval only)
 
-# Publishes the GitHub release for the version in package.json, but only after
-# the "VaultBox CI" workflow succeeded on the exact commit on main.
+# Never publish from a push, PR or the presence of release notes alone.
 on:
-  workflow_run:
-    workflows: ["VaultBox CI"]
-    types: [completed]
-    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable package version (e.g., 2.5.0)
+        required: true
+        type: string
+      release_sha:
+        description: Full 40-character main SHA with successful completed CI
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: vaultbox-intentional-release
+  cancel-in-progress: false
 
 jobs:
   release:
-    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    # Configure required environment reviewers in GitHub repository settings.
+    if: github.repository == 'wbizmo/vaultbox-api'
     runs-on: ubuntu-latest
+    timeout-minutes: 12
+    environment: vaultbox-release
+    permissions:
+      contents: write
+      actions: read
     steps:
-      - name: Checkout the exact CI-verified commit
+      - name: Checkout exact candidate
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ inputs.release_sha }}
+          persist-credentials: false
 
-      - name: Publish release for package.json version
+      - name: Use pinned Node runtime
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+
+      - name: Verify main, version, release notes, and exact-SHA CI
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
         run: |
           set -euo pipefail
-          version="$(node -p "require('./package.json').version")"
-          tag="v${version}"
-          notes="docs/RELEASE_NOTES_${tag}.md"
-          if [ ! -f "$notes" ]; then
-            echo "No $notes for ${tag}; not publishing."
-            exit 0
+          main_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)"
+          gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
+            --commit "$RELEASE_SHA" --limit 100 \
+            --json headSha,headBranch,event,status,conclusion > /tmp/vaultbox-ci-runs.json
+          node scripts/verify-release-gate.js \
+            --version="$RELEASE_VERSION" --sha="$RELEASE_SHA" \
+            --main-sha="$main_sha" --runs=/tmp/vaultbox-ci-runs.json
+          echo "Validated release v$RELEASE_VERSION at $RELEASE_SHA"
+
+      - name: Publish only the validated tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          tag="v$RELEASE_VERSION"
+          # Refuse if main moved after the exact-SHA gate ran.
+          current_main="$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)"
+          if [ "$current_main" != "$RELEASE_SHA" ]; then
+            echo "::error::main moved since verification"
+            exit 1
           fi
+          notes="docs/RELEASE_NOTES_$tag.md"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "${tag} already exists; leaving the existing release untouched."
-            exit 0
+            echo "::error::Release already exists; refusing to republish"
+            exit 1
           fi
-          # A bare tag (no release) is invisible to `gh release view`, and
-          # `gh release create --target` does not move an existing tag.
-          # Refuse to publish unless the tag is absent or already on RELEASE_SHA.
-          refs="$(git ls-remote --tags origin "refs/tags/${tag}" "refs/tags/${tag}^{}")"
-          tag_sha="$(printf '%s\n' "$refs" | awk -v t="refs/tags/${tag}^{}" '$2==t{print $1}')"
+          refs="$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")"
+          tag_sha="$(printf '%s\n' "$refs" | awk -v t="refs/tags/$tag^{}" '$2==t{print $1}')"
           if [ -z "$tag_sha" ]; then
-            tag_sha="$(printf '%s\n' "$refs" | awk -v t="refs/tags/${tag}" '$2==t{print $1}')"
+            tag_sha="$(printf '%s\n' "$refs" | awk -v t="refs/tags/$tag" '$2==t{print $1}')"
           fi
           if [ -n "$tag_sha" ] && [ "$tag_sha" != "$RELEASE_SHA" ]; then
-            echo "::error::Tag ${tag} already points to ${tag_sha}, not CI-verified commit ${RELEASE_SHA}; refusing to publish."
+            echo "::error::Tag points to $tag_sha, not the verified $RELEASE_SHA"
             exit 1
           fi
           title="$(head -n 1 "$notes" | sed 's/^# *//')"
-          gh release create "$tag" \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$RELEASE_SHA" \
-            --title "$title" \
-            --notes-file "$notes"
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+            --target "$RELEASE_SHA" --title "$title" --notes-file "$notes"
