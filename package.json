@@ -37,6 +37,8 @@
     "npm": ">=11 <12"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "3.1165.0",
+    "@aws-sdk/lib-storage": "3.1165.0",
     "@fastify/cors": "^11.2.0",
     "@fastify/jwt": "^10.2.2",
     "@fastify/multipart": "^10.1.1",

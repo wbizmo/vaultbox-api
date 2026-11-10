@@ -216,9 +216,33 @@ class LocalStorageAdapter {
   }
 }
 
-const storage = new LocalStorageAdapter();
+function createStorageFromEnvironment(env = process.env) {
+  const backend = (env.STORAGE_BACKEND || "local").toLowerCase();
+  if (backend === "local") {
+    return new LocalStorageAdapter(env.LOCAL_STORAGE_ROOT);
+  }
+  if (backend !== "s3") throw new Error("STORAGE_BACKEND must be local or s3");
+  if (!env.S3_BUCKET || !env.S3_REGION) {
+    throw new Error("S3_BUCKET and S3_REGION are mandatory when STORAGE_BACKEND=s3");
+  }
+  const { S3StorageAdapter } = require("./s3-storage");
+  if (env.S3_FORCE_PATH_STYLE && !["true", "false"].includes(env.S3_FORCE_PATH_STYLE)) {
+    throw new Error("S3_FORCE_PATH_STYLE must be true or false");
+  }
+  return new S3StorageAdapter({
+    bucket: env.S3_BUCKET,
+    region: env.S3_REGION,
+    endpoint: env.S3_ENDPOINT || undefined,
+    prefix: env.S3_OBJECT_PREFIX ?? "vaultbox",
+    sse: env.S3_SERVER_SIDE_ENCRYPTION ?? "AES256",
+    forcePathStyle: env.S3_FORCE_PATH_STYLE === "true"
+  });
+}
+
+const storage = createStorageFromEnvironment();
 
 module.exports = {
   LocalStorageAdapter,
+  createStorageFromEnvironment,
   storage
 };
