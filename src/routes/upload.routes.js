@@ -27,6 +27,7 @@ const {
   cleanupUploadSessions
 } = require("../lib/upload-session");
 const { retryOnConflict } = require("../lib/db-retry");
+const { pruneMetadata } = require("../lib/metadata-retention");
 const { assertOwnedFolderLocked } = require("../lib/folder-ownership");
 const { throttlePreHandler } = require("../lib/throttle");
 
@@ -120,17 +121,22 @@ async function uploadRoutes(app) {
   const storage = app.vaultboxStorage;
   const config = app.vaultboxConfig;
 
-  app.addHook("onReady", async () => {
-    await cleanupUploadSessions(storage).catch((error) => {
-      app.log.warn({ err: error }, "Initial resumable-upload cleanup failed");
-    });
-  });
-
-  const cleanupTimer = setInterval(() => {
-    cleanupUploadSessions(storage).catch((error) => {
+  async function sweepUploadAndMetadata() {
+    try {
+      await cleanupUploadSessions(storage);
+    } catch (error) {
       app.log.warn({ err: error }, "Resumable-upload cleanup failed");
-    });
-  }, 5 * 60 * 1000);
+    }
+    try {
+      const counts = await pruneMetadata();
+      if (counts.total > 0) app.log.info({ counts }, "Transfer metadata pruned");
+    } catch (error) {
+      app.log.warn({ err: error }, "Transfer metadata pruning failed");
+    }
+  }
+
+  app.addHook("onReady", sweepUploadAndMetadata);
+  const cleanupTimer = setInterval(sweepUploadAndMetadata, 5 * 60 * 1000);
   cleanupTimer.unref();
   app.addHook("onClose", async () => clearInterval(cleanupTimer));
 

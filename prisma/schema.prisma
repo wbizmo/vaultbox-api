@@ -144,6 +144,7 @@ model DownloadToken {
   @@index([userId, expiresAt])
   @@index([fileId, expiresAt])
   @@index([expiresAt])
+  @@index([expiresAt, id])
 }
 
 model UploadSession {
@@ -175,6 +176,7 @@ model UploadSession {
   @@index([status, expiresAt])
   @@index([status, completionLeaseUntil])
   @@index([userId, createdAt])
+  @@index([status, updatedAt, id])
 }
 
 model UploadPart {
