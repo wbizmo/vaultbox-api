@@ -91,6 +91,9 @@ jobs:
       - name: Benchmark
         run: npm run benchmark | tee benchmark.json
 
+      - name: Real HTTP transfer and database benchmark
+        run: npm run benchmark:transfers | tee transfer-benchmark.json
+
       - name: Upload engineering evidence
         if: always()
         uses: actions/upload-artifact@v6
@@ -98,5 +101,6 @@ jobs:
           name: vaultbox-engineering-evidence
           path: |
             benchmark.json
+            transfer-benchmark.json
             dependency-audit.json
           retention-days: 30

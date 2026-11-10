@@ -344,3 +344,26 @@ Release publishing no longer runs automatically after any push or successful CI.
 Before enabling the workflow, configure **required human reviewers for the `vaultbox-release` environment** in GitHub repository settings; YAML declaring an environment alone does not enforce reviewers. Keep `main` branch protection and the `VaultBox CI` required check enabled. Draft PR checks are skipped to avoid using GitHub Actions as a debugger; maintain the exact local Node/Postgres/Redis verification transcript and artifacts for each checkpoint, then mark the PR ready only after all acceptance criteria and full CI pass. Do not publish v2.5.0 or merge this draft until the user explicitly approves the release.
 
 Rollback runbook: freeze writes, take a PostgreSQL and object-store snapshot, confirm migrations are additive and backward-compatible, migrate the staging clone first, compare authenticated health, file writes/reads and folder/listing APIs, then promote the precise verified commit. If acceptance fails, revert the application to the previous known-good SHA while leaving compatible additive columns in place; restore DB/object backups only if an incompatible data conversion occurred. A reverse migration must never delete data generated under the newer code without an independently validated export.
+
+### Reproducible transfer and database benchmark (draft #58)
+
+`npm run benchmark` still runs the original health-inject microbenchmark for backward comparison. `npm run benchmark:transfers` exercises **real loopback HTTP** multipart one-shot uploads, resumable session initiation, part PUT/completion, authenticated cursor file listings, download-token creation, ranged GET and file deletion, with real PostgreSQL quota/session/audit operations and the configured Redis coordination. The workload uses **1, 4, 16 and 32** concurrent transfer clients for both one-shot and resumable flows, 256 KiB objects divided into 64 KiB parts by default. It creates isolated test users and data, and purges generated users/bytes on completion. It fails on any HTTP/transfer/DB error, timeout, bad range response, or exceeded memory budget. Do not run this against production or an externally reachable host.
+
+Environment: Node 24.22.2, a disposable PostgreSQL database and Redis. Example:
+
+```bash
+export NODE_ENV=test
+export DATABASE_URL=postgresql://benchmark:benchmark@127.0.0.1:5432/benchmark
+export REDIS_URL=redis://127.0.0.1:6379
+export JWT_SECRET=ci-only-secret-that-is-long-enough-for-tests
+npm ci
+npx prisma generate && npx prisma migrate deploy
+npm run benchmark:transfers > transfer-benchmark.json
+# Extended local/scheduled profile; keep file sizes within configured upload limit:
+BENCHMARK_FILE_BYTES=1048576 BENCHMARK_CHUNK_BYTES=65536 \
+  BENCHMARK_MAX_RSS_MB=1024 npm run benchmark:transfers
+```
+
+The JSON records per-stage throughput (requests/sec and MiB/sec), p50/p95/p99 latency, errors, peak RSS, process CPU time and SQL query counts. PostgreSQL queries are *counted* using an explicit benchmark-only Prisma event hook; query text and parameters are **not logged**. The isolated performance build opts out of the **coarse 240/IP global rate cap** to measure infrastructure, while route-specific security throttles and production defaults remain in place. Production limits remain intact. Hashing and transfers are expected to take **O(file size)** time; bounded parts prevent unbounded buffering.
+
+Benchmark thresholds are **failure=0 and peak RSS <= 1024 MiB** by default, with 20-second per-request timeout; hard microsecond latency limits are intentionally avoided due to machine/runner variance. Preserve the JSON artifact for before/after measurements, identify VM CPU, allocated memory, Node and PostgreSQL/Redis versions, and compare warmed-loopback results only with the *same* environment. Longer file/transfer stress tests should run separately; these results do not represent Render cold starts, internet latency, or production S3 throughput. If the 32-client or memory gate fails, do not publish the release.

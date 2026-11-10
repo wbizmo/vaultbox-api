@@ -12,7 +12,8 @@
     "benchmark": "node scripts/benchmark.js",
     "deploy:migrate": "prisma migrate deploy",
     "seed": "node prisma/seed.js",
-    "deploy:generate": "prisma generate"
+    "deploy:generate": "prisma generate",
+    "benchmark:transfers": "node scripts/benchmark-transfers.js"
   },
   "keywords": [
     "cloud-storage",

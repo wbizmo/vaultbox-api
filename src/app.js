@@ -73,7 +73,9 @@ function buildApp(options = {}) {
   });
 
   app.register(rateLimit, {
-    max: 240,
+    // Benchmark traffic is isolated and explicitly opts out of the coarse global
+    // IP rate cap; normal production and test apps retain the 240/min guard.
+    max: options.rateLimitMax ?? 240,
     timeWindow: "1 minute"
   });
 
