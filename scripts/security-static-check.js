@@ -1,3 +1,4 @@
+// @ts-check
 "use strict";
 
 const fs=require("node:fs");
@@ -11,10 +12,12 @@ const signatures=[
   {name:"password-bearing database URL",pattern:/postgres(?:ql)?:\/\/[^\/:\s'"]+:[^@\s'"]+@/}
 ];
 
+/** @param {string} content */
 function findSecrets(content) {
   return signatures.filter(item=>item.pattern.test(content)).map(item=>item.name);
 }
 
+/** @param {string} [root] */
 function scanTracked(root=process.cwd()) {
   const names=execFileSync("git",["ls-files","-z","--","src","prisma","scripts"],{
     cwd:root,encoding:"utf8"
@@ -35,6 +38,7 @@ function scanTracked(root=process.cwd()) {
   return {scannedFiles:names.length,findings};
 }
 
+/** @param {unknown} input */
 function redactEvidence(input) {
   return String(input)
     .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+/gi,"Bearer [REDACTED]")

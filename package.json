@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "build": "echo build skipped",
-    "lint": "npx --yes eslint@10.10.0 src scripts test prisma",
+    "build": "npm run deploy:generate && npm run typecheck && node scripts/verify-build.js",
+    "lint": "eslint src scripts test prisma",
     "test": "node --test --test-concurrency=1",
     "benchmark": "node scripts/benchmark.js",
     "deploy:migrate": "prisma migrate deploy",
@@ -15,7 +15,8 @@
     "deploy:generate": "prisma generate",
     "benchmark:transfers": "node scripts/benchmark-transfers.js",
     "benchmark:queries": "node scripts/profile-postgres.js",
-    "security:scan": "node scripts/security-static-check.js"
+    "security:scan": "node scripts/security-static-check.js",
+    "typecheck": "tsc --project tsconfig.json --noEmit"
   },
   "keywords": [
     "cloud-storage",
@@ -55,5 +56,10 @@
     "fastify": "^5.12.1",
     "prisma": "6.12.0",
     "redis": "^6.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.0",
+    "eslint": "9.39.5",
+    "typescript": "5.9.3"
   }
 }

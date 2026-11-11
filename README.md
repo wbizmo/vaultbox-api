@@ -256,29 +256,38 @@ npm run seed
 npm run dev
 ```
 
-## Verification
+## Verification for v2.5.0 review
 
 ```bash
+npm ci
+npm run deploy:generate
+npx prisma validate
+npm run typecheck
+npm run build
 npm run lint
+npm run security:scan
 npm test
 npm run benchmark
-npm audit --audit-level=high
+npm run benchmark:transfers
+npm run benchmark:queries
+npm audit --audit-level=moderate
 ```
 
-CI provisions PostgreSQL and Redis and requires dependency audit, Prisma generation, migration deployment, syntax checks, ESLint, unit/integration tests, concurrency coverage, and benchmark evidence before merge.
+The Node.js backend requires no JavaScript transpilation. The **real build** generates the Prisma client, performs strict TypeScript checking of the generated Prisma upload/quota/cleanup type contracts and checked JavaScript security and exact-SHA release-gate code, then validates that the runtime and all route modules load correctly. **The typecheck does not yet cover every JavaScript source file**; syntax validation, ESLint, security analysis and integration tests cover the remaining untyped JavaScript. Build and typecheck are not no-op commands. CI also checks PostgreSQL 16 migrations, Redis 7 coordination, distributed fault-injection, the 10,000-session cleanup backlog, real HTTP transfer tests, security-extended CodeQL and benchmark evidence. Superseded PR SHA runs are cancelled to reduce wasted runner minutes.
+
+`main` is still on the published v2.2.0 release until this PR is merged. The expanded CI workflow will automatically become the main-branch workflow when this PR merges; the reviewed exact main SHA must then pass the same gate.
 
 ## Production deployment
 
-Render tracks `main` with auto-deploy enabled. The production start contract is deliberately migration-aware:
+**v2.5.0 changes the startup contract.** The old v2.2.0 Render service currently generates Prisma and applies migrations inside `npm start`. The new release deliberately separates these operations:
 
 ```text
-npm start
-  -> prisma generate
-  -> prisma migrate deploy
-  -> node src/server.js
+Build: npm ci && npm run build
+Approved migration/predeploy stage: npm run deploy:migrate
+Start: npm start (node src/server.js only)
 ```
 
-Fastify therefore does not bind its public port until committed Prisma migrations have been applied to Neon.
+Update Render's build and deploy settings, verify persistent storage and rehearse migration rollback **before** merging. The PR's release/version update is not a production deployment. Do not rely on an application process to run migrations on every replica boot, and do not treat an ephemeral Render filesystem as durable user storage.
 
 After each production deploy verify:
 

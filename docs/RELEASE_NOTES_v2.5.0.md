@@ -30,3 +30,9 @@ All existing v2.2.0 security, account, rate-limit, audit and quota contracts rem
 - Configure Render's separate build-time Prisma generate and approved migration stage before any merge (current production uses \`npm start\` migrations).
 - Configure required human reviewers for the GitHub \`vaultbox-release\` environment, disable unintended automatic deployment for this migration, take backups, rehearse rollback and live smoke tests.
 - After explicit approval: merge, run protected-main CI at the exact SHA, intentionally dispatch the release gate, verify production deployment and record evidence in epic #66 and tracker #68. No automated publishing from a draft PR.
+
+## Review-ready CI gate (not a production release)
+
+The consolidated PR workflow on its exact head runs Node 24.22.2, PostgreSQL 16, Redis 7, locked npm ci, moderate-severity-or-higher npm dependency audit, Prisma schema validation and migrations, strict TypeScript checking of generated data-model contracts plus checked security JavaScript, a real Prisma/runtime module build smoke, ESLint, syntax checking, static secret scanning, the full integration suite with coverage, explicit independent-process/BOLA/failure corpus, 10k-session cleanup stress, three benchmark suites and CodeQL security-extended. One runner handles verification and CodeQL; redundant SHA runs are cancelled. The final green CI run, review threads and any operational exceptions must be inspected before merge approval.
+
+Main currently runs the prior version's CI until this review PR is merged. Do not push a standalone version/CI update to main merely to obtain a green check: Render currently auto-deploys main, and pushing would risk an unapproved production deployment. The full CI workflow is committed in this PR and will replace the old main workflow as part of the reviewed merge. CodeRabbit and human reviewers should review the full consolidated diff, not just the latest commit.

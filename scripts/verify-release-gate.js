@@ -1,8 +1,15 @@
+// @ts-check
 "use strict";
 
 const fs = require("node:fs");
 const path = require("node:path");
 
+/**
+ * @typedef {{headSha: string, headBranch: string, event: string,
+ *   status: string, conclusion: string}} CheckedWorkflowRun
+ * @param {{version: string, sha: string, mainSha: string,
+ *   packageVersion: string, runs: CheckedWorkflowRun[], notesDirectory: string}} input
+ */
 function validateReleaseGate({ version, sha, mainSha, packageVersion, runs, notesDirectory }) {
   if (!/^\d+\.\d+\.\d+$/.test(version || "")) throw new Error("Release version must be stable semver");
   if (!/^[0-9a-f]{40}$/.test(sha || "")) throw new Error("Release SHA must be a full lowercase git SHA");
@@ -21,7 +28,9 @@ function validateReleaseGate({ version, sha, mainSha, packageVersion, runs, note
   return { version, sha, tag: "v" + version, notes };
 }
 
+/** @param {string[]} argv */
 function args(argv) {
+  /** @type {Record<string,string>} */
   const result = {};
   for (const value of argv) {
     const i = value.indexOf("=");
@@ -46,7 +55,10 @@ function main() {
   console.log("Release verification passed for " + ok.tag + " at " + ok.sha);
 }
 if (require.main === module) {
-  try { main(); } catch (error) { console.error("Release gate rejected:", error.message); process.exitCode = 1; }
+  try { main(); } catch (error) {
+    console.error("Release gate rejected:", error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  }
 }
 
 module.exports = { validateReleaseGate };

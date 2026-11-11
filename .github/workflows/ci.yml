@@ -11,12 +11,18 @@ permissions:
   contents: read
   security-events: write
 
+# One live run per PR branch, cancel superseded SHA checks to save CI minutes.
+concurrency:
+  group: vaultbox-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
-    # Draft PR checkpoints are validated in the local VM, not billed GitHub runners.
+    # Review-ready PRs and all main pushes run the exact same verification.
+    # Draft checkpoints remain locally verified to limit wasted Actions minutes.
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:16-alpine
@@ -62,23 +68,39 @@ jobs:
           echo "node ${actual} (expected ${expected}); npm $(npm --version)"
           test "$actual" = "$expected"
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Initialize CodeQL extended security analysis
+        uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript
+          build-mode: none
+          queries: security-extended
+
+      - name: Install locked dependencies
+        run: npm ci --no-fund --no-audit
 
       - name: Dependency security gate
         run: |
           set +e
-          npm audit --audit-level=high --json > dependency-audit.json
+          npm audit --audit-level=moderate --json > dependency-audit.json
           status=$?
           set -e
           cat dependency-audit.json
           exit $status
 
-      - name: Generate Prisma client
-        run: npx prisma generate
+      - name: Validate Prisma schema
+        run: npx prisma validate
 
-      - name: Apply database migrations
-        run: npx prisma migrate deploy
+      - name: Generate Prisma client
+        run: npm run deploy:generate
+
+      - name: Apply committed migrations on isolated CI Postgres 16
+        run: npm run deploy:migrate
+
+      - name: Typecheck generated Prisma contracts and checked JavaScript
+        run: npm run typecheck
+
+      - name: Build deployable Node API (Prisma runtime and module smoke)
+        run: npm run build | tee build-verification.log
 
       - name: Syntax check
         run: find src scripts test prisma -name '*.js' -print0 | xargs -0 -n1 node --check
@@ -92,7 +114,7 @@ jobs:
       - name: Full unit, integration, BOLA, crash and multipart fault suite
         run: |
           set +e
-          npm test > test-output.raw.log 2>&1
+          npm test -- --experimental-test-coverage > test-output.raw.log 2>&1
           code=$?
           set -e
           node scripts/redact-test-artifacts.js test-output.raw.log test-output.redacted.log
@@ -111,24 +133,21 @@ jobs:
         run: node --test test/upload-cleanup-worker.integration.test.js
 
       - name: Benchmark
-        run: npm run benchmark | tee benchmark.json
+        run: |
+          set -euo pipefail
+          npm run benchmark | tee benchmark.json
 
       - name: Real HTTP transfer and database benchmark
-        run: npm run benchmark:transfers | tee transfer-benchmark.json
+        run: |
+          set -euo pipefail
+          npm run benchmark:transfers | tee transfer-benchmark.json
 
       - name: PostgreSQL query plans and optional count benchmark
-        run: npm run benchmark:queries | tee query-benchmark.json
+        run: |
+          set -euo pipefail
+          npm run benchmark:queries | tee query-benchmark.json
 
-      # CodeQL is deliberately on the SAME runner as the complete local-
-      # equivalent quality gate, to avoid an extra paid runner. Draft PRs skip
-      # this entire job until the owner authorizes review-ready CI.
-      - name: Initialize CodeQL extended security analysis
-        uses: github/codeql-action/init@v4
-        with:
-          languages: javascript-typescript
-          build-mode: none
-          queries: security-extended
-
+      # CodeQL security-extended runs on this same runner, not a second job.
       - name: Analyze CodeQL findings
         uses: github/codeql-action/analyze@v4
 
@@ -143,4 +162,5 @@ jobs:
             query-benchmark.json
             dependency-audit.json
             test-output.redacted.log
+            build-verification.log
           retention-days: 30
