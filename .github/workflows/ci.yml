@@ -9,13 +9,14 @@ on:
 
 permissions:
   contents: read
+  security-events: write
 
 jobs:
   verify:
     # Draft PR checkpoints are validated in the local VM, not billed GitHub runners.
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:16-alpine
@@ -117,6 +118,19 @@ jobs:
 
       - name: PostgreSQL query plans and optional count benchmark
         run: npm run benchmark:queries | tee query-benchmark.json
+
+      # CodeQL is deliberately on the SAME runner as the complete local-
+      # equivalent quality gate, to avoid an extra paid runner. Draft PRs skip
+      # this entire job until the owner authorizes review-ready CI.
+      - name: Initialize CodeQL extended security analysis
+        uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript
+          build-mode: none
+          queries: security-extended
+
+      - name: Analyze CodeQL findings
+        uses: github/codeql-action/analyze@v4
 
       - name: Upload engineering evidence
         if: always()

@@ -106,10 +106,17 @@ function startTempHeartbeat(objectKey, token, leaseMs = 120000, client = prisma)
 }
 
 async function assertTemporaryOwned(tx, objectKey, token) {
-  const row = await tx.temporaryObject.findFirst({
-    where: { objectKey, token, state: "ACTIVE" }, select: { id: true }
-  });
-  if (!row) {
+  // Lock the claim THROUGH the File + quota commit, not just read it. Without
+  // this row fence, a stale reaper can CAS ACTIVE→REAPING after our ownership
+  // lookup but before the File reference commits, then delete the just-published
+  // bytes. The reaper's UPDATE now waits for our transaction and rechecks.
+  const rows = await tx.$queryRawUnsafe(
+    'SELECT "id" FROM "TemporaryObject" ' +
+    'WHERE "objectKey"=$1 AND "token"=$2 AND "state"=\'ACTIVE\' ' +
+    'AND "leaseUntil" > NOW() FOR UPDATE',
+    objectKey, token
+  );
+  if (rows.length !== 1) {
     const error = new Error("Temporary object claim expired or was revoked");
     error.code = "TEMP_CLAIM_LOST";
     throw error;

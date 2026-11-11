@@ -31,7 +31,7 @@ const { retryOnConflict } = require("../lib/db-retry");
 const { pruneMetadata } = require("../lib/metadata-retention");
 const { assertOwnedFolderLocked } = require("../lib/folder-ownership");
 const { claimTemporary, reserveTemporary, startTempHeartbeat,
-  releaseTemporary, ensurePhysicalHeadroom } = require("../lib/temporary-storage");
+  releaseTemporary, assertTemporaryOwned, ensurePhysicalHeadroom } = require("../lib/temporary-storage");
 const { reconcileStorage } = require("../lib/storage-reconciliation");
 const { throttlePreHandler } = require("../lib/throttle");
 
@@ -650,6 +650,7 @@ async function uploadRoutes(app) {
         });
         if (!owned) throw leaseLostError();
         await assertOwnedFolderLocked(tx, request.user.id, owned.folderId);
+        await assertTemporaryOwned(tx, assemblyKey, assemblyClaim.token);
 
         const quota = await commitUploadReservation(request.user.id, session.expectedSize, tx);
         if (!quota) {
@@ -697,6 +698,13 @@ async function uploadRoutes(app) {
       }));
     } catch (error) {
       heartbeat.stop();
+      if (error.code === "TEMP_CLAIM_LOST") {
+        // A reconciler owns this stale object now; do not unlink bytes from
+        // under its lease. Yield completion so the client can retry safely.
+        assemblyHeartbeat.stop();
+        await giveBack();
+        return reply.code(409).send({ message: "Assembly ownership expired; retry upload completion" });
+      }
       await deleteAbandonedAssembly();
       if (error.code === "UPLOAD_COMPLETION_LEASE_LOST") {
         // Someone else now owns (or has finished) this session; touch nothing of theirs.

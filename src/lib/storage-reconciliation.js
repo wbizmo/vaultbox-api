@@ -131,15 +131,41 @@ async function recheckAndSweepClaim(storage, claim, cutoff, client, stats) {
 }
 
 // Bounded, conservative scanner: legacy unclaimed objects are reported but
-// NOT deleted. An older process may have an in-flight upload without a ledger.
+// NEVER deleted because a process from before the ledger might still write.
+// Retain one directory cursor per adapter between sweeps; opening the directory
+// from the beginning every five minutes would starve names after batchSize.
+const localScanCursors = new WeakMap();
 async function scanUnclaimedLocal(storage, client, stats, cutoff, limit) {
-  let seen = 0;
-  const dir = await fs.opendir(storage.root);
+  let cursorPromise = localScanCursors.get(storage);
+  if (!cursorPromise) {
+    cursorPromise = fs.opendir(storage.root).then((dir) => ({ dir, busy: false }));
+    localScanCursors.set(storage, cursorPromise);
+  }
+  let state;
   try {
-    for await (const entry of dir) {
-      if (seen++ >= limit) break;
+    state = await cursorPromise;
+  } catch (error) {
+    localScanCursors.delete(storage);
+    throw error;
+  }
+  if (state.busy) return; // a slow concurrent sweep must not consume the cursor twice
+  state.busy = true;
+  let exhausted = false;
+  try {
+    for (let seen = 0; seen < limit; seen++) {
+      const entry = await state.dir.read();
+      if (!entry) {
+        exhausted = true;
+        break;
+      }
       if (!entry.isFile() || !/^[A-Za-z0-9._-]+$/.test(entry.name)) continue;
-      const stat = await fs.lstat(storage.resolve(entry.name));
+      let stat;
+      try {
+        stat = await fs.lstat(storage.resolve(entry.name));
+      } catch (error) {
+        if (error.code === "ENOENT") continue; // another cleanup already removed it
+        throw error;
+      }
       if (!stat.isFile() || stat.isSymbolicLink() || stat.mtime > cutoff) continue;
       const [file, claimed] = await Promise.all([
         client.file.findFirst({ where: { storedName: entry.name }, select: { id: true } }),
@@ -150,8 +176,15 @@ async function scanUnclaimedLocal(storage, client, stats, cutoff, limit) {
       ]);
       if (!file && !claimed) stats.unclaimedLegacyObjects++;
     }
+  } catch (error) {
+    exhausted = true; // restart safely from beginning if the handle is invalid
+    throw error;
   } finally {
-    await dir.close().catch(() => null);
+    state.busy = false;
+    if (exhausted) {
+      localScanCursors.delete(storage);
+      await state.dir.close().catch(() => null);
+    }
   }
 }
 

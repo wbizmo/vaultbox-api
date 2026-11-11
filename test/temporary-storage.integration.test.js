@@ -241,3 +241,24 @@ test("mid-assembly ENOSPC preserves resumable state and retries with exact one-t
   assert.equal(state.reservedUploadBytes,0n);
   assert.equal(await prisma.temporaryObject.count({where:{userId:f.users[0].id}}),0);
 });
+
+test("unknown legacy object inventory advances beyond batch-size without deleting any unowned bytes",async t=>{
+  const f=await fixture(t);
+  const old=new Date(Date.now()-3*3600000);
+  const keys=[];
+  for(let i=0;i<120;i++){
+    const key=crypto.randomUUID();
+    keys.push(key);
+    await fs.writeFile(f.storage.resolve(key),"unknown legacy object "+i);
+    await fs.utimes(f.storage.resolve(key),old,old);
+  }
+  let observed=0;
+  for(let i=0;i<13;i++){
+    const scan=await reconcileStorage(f.storage,prisma,{graceMs:60000,batchSize:10});
+    assert.equal(scan.errors,0,JSON.stringify(scan));
+    observed+=scan.unclaimedLegacyObjects;
+  }
+  assert.equal(observed,keys.length,
+    "the scanner must advance its directory cursor rather than repeatedly inspect its first page");
+  for(const key of keys)assert.equal(await f.storage.exists(key),true);
+});

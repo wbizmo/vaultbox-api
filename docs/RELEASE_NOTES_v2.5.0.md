@@ -6,7 +6,7 @@
 
 - v2.3 reliability: S3-compatible shared adapter and checksum-safe dry-run migration tooling (#53); durable physical-deletion outbox (#54); bounded, crash-recoverable temporary-byte admission and orphan reconciliation (#55); cancel-safe storage streams (#56); retention and pruning of terminal session metadata (#57).
 - v2.4 scalability and security: real HTTP/database load profiles (#58); ordered, fenced, leased cleanup workers and measured terminal-session indexing (#59); keyset/summarized 10,000-part progress (#60); independent-process, SIGKILL, BOLA, fuzz, audit and secret scanning gates (#61); exact-SHA/manual release approval and pinned migration stage (#62); profiled PostgreSQL count-free optional pages (#63).
-- v2.5 API: secure folder-assigned one-shot/resumable uploads and moves (#64); reserved quota and actually allocatable bytes reported to clients (#65).
+- Developer tooling: replace vulnerable nodemon/minimatch with native Node 24 watch mode.\n- v2.5 API: secure folder-assigned one-shot/resumable uploads and moves (#64); reserved quota and actually allocatable bytes reported to clients (#65).
 
 All existing v2.2.0 security, account, rate-limit, audit and quota contracts remain mandatory.
 
@@ -25,7 +25,7 @@ All existing v2.2.0 security, account, rate-limit, audit and quota contracts rem
 ## Release gates (not yet signed off)
 
 - Verify complete local Node 24.22.2, PostgreSQL 16, Redis 7, lint, audit, integration, fault, performance and rollback/forward compatibility evidence on the exact final commit.
-- Complete CodeRabbit/human review and reconcile every linked issue's acceptance criteria except the explicitly documented provider exception.
+- Run CodeQL v4 security-extended analysis on the exact reviewed commit; this is configured in the existing single CI verify runner and skipped while the PR is draft (CodeQL cannot be accurately claimed as locally executed). Complete CodeRabbit/human review and reconcile every linked issue's acceptance criteria except the explicitly documented provider exception.
 - Configure Render's separate build-time Prisma generate and approved migration stage before any merge (current production uses \`npm start\` migrations).
 - Configure required human reviewers for the GitHub \`vaultbox-release\` environment, disable unintended automatic deployment for this migration, take backups, rehearse rollback and live smoke tests.
 - After explicit approval: merge, run protected-main CI at the exact SHA, intentionally dispatch the release gate, verify production deployment and record evidence in epic #66 and tracker #68. No automated publishing from a draft PR.
