@@ -6,7 +6,8 @@
 
 - v2.3 reliability: S3-compatible shared adapter and checksum-safe dry-run migration tooling (#53); durable physical-deletion outbox (#54); bounded, crash-recoverable temporary-byte admission and orphan reconciliation (#55); cancel-safe storage streams (#56); retention and pruning of terminal session metadata (#57).
 - v2.4 scalability and security: real HTTP/database load profiles (#58); ordered, fenced, leased cleanup workers and measured terminal-session indexing (#59); keyset/summarized 10,000-part progress (#60); independent-process, SIGKILL, BOLA, fuzz, audit and secret scanning gates (#61); exact-SHA/manual release approval and pinned migration stage (#62); profiled PostgreSQL count-free optional pages (#63).
-- Developer tooling: replace vulnerable nodemon/minimatch with native Node 24 watch mode.\n- v2.5 API: secure folder-assigned one-shot/resumable uploads and moves (#64); reserved quota and actually allocatable bytes reported to clients (#65).
+- Developer tooling: replace vulnerable nodemon/minimatch with native Node 24 watch mode.
+- v2.5 API: secure folder-assigned one-shot/resumable uploads and moves (#64); reserved quota and actually allocatable bytes reported to clients (#65).
 
 All existing v2.2.0 security, account, rate-limit, audit and quota contracts remain mandatory.
 
