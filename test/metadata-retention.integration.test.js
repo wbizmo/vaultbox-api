@@ -34,11 +34,16 @@ test("bounded keyset pruning is restartable, cascades terminal parts, and protec
   const terminal=Array.from({length:117},(_,i)=>({
     id:"ret-"+crypto.randomUUID(),userId:user.id,originalName:"old-"+i,
     mimeType:"application/octet-stream",expectedSize:1n,chunkSize:1,partCount:1,
-    status:["COMPLETED","ABORTED","EXPIRED"][i%3],expiresAt:old,updatedAt:old
+    status:["COMPLETED","ABORTED","EXPIRED"][i%3],expiresAt:old,updatedAt:old,chunksCleanedAt:old
   }));
   await prisma.uploadSession.createMany({data:terminal});
   const active=await prisma.uploadSession.create({data:{userId:user.id,originalName:"live",mimeType:"application/octet-stream",expectedSize:1n,chunkSize:1,partCount:1,status:"UPLOADING",expiresAt:new Date(now.getTime()+86400000),updatedAt:old}});
   const completing=await prisma.uploadSession.create({data:{userId:user.id,originalName:"live completing",mimeType:"application/octet-stream",expectedSize:1n,chunkSize:1,partCount:1,status:"COMPLETING",expiresAt:old,updatedAt:old}});
+  const uncleaned=await prisma.uploadSession.create({data:{
+    userId:user.id,originalName:"old physical bytes pending",mimeType:"application/octet-stream",
+    expectedSize:1n,chunkSize:1,partCount:1,status:"EXPIRED",
+    expiresAt:old,updatedAt:old,chunksCleanedAt:null
+  }});
   await prisma.uploadPart.createMany({data:terminal.slice(0,30).map(x=>({sessionId:x.id,partNumber:0,offset:0n,size:1n,checksum:"f".repeat(64),storedName:crypto.randomUUID()}))});
   const tokens=Array.from({length:117},()=>({fileId:file.id,userId:user.id,token:crypto.randomUUID(),expiresAt:old}));
   await prisma.downloadToken.createMany({data:tokens});
@@ -60,6 +65,8 @@ test("bounded keyset pruning is restartable, cascades terminal parts, and protec
   assert.ok(iterations>=7);
   assert.equal(await prisma.uploadPart.count({where:{sessionId:{in:terminal.map(x=>x.id)}}}),0);
   assert.equal(await prisma.uploadSession.count({where:{id:{in:[active.id,completing.id]}}}),2);
+  assert.equal(await prisma.uploadSession.count({where:{id:uncleaned.id}}),1,
+    "metadata retention must not erase a job before its physical chunks are cleaned");
   assert.equal(await prisma.downloadToken.count({where:{id:{in:[valid.id,recentExpired.id]}}}),2);
   assert.equal(await prisma.auditLog.count({where:{id:oldAudit.id}}),1);
   assert.equal(await prisma.file.count({where:{id:file.id}}),1);

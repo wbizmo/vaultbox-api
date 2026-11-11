@@ -51,6 +51,7 @@ async function pruneMetadata(options = {}, client = prisma) {
     WITH candidates AS (
       SELECT "id" FROM "UploadSession"
       WHERE "status" IN ('COMPLETED'::"UploadSessionStatus", 'ABORTED'::"UploadSessionStatus", 'EXPIRED'::"UploadSessionStatus")
+        AND "chunksCleanedAt" IS NOT NULL
         AND "updatedAt" < ${uploadCutoff}
       ORDER BY "updatedAt" ASC, "id" ASC
       LIMIT ${batchSize} FOR UPDATE SKIP LOCKED

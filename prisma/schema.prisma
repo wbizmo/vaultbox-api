@@ -166,6 +166,12 @@ model UploadSession {
   completionToken      String?
   completionLeaseUntil DateTime?
   completionGeneration Int                 @default(0)
+  // Bounded multi-replica cleanup claims with crash-recoverable leases and retries.
+  cleanupToken         String?
+  cleanupLeaseUntil    DateTime?
+  cleanupAttempts      Int                 @default(0)
+  cleanupLastError     String?
+  chunksCleanedAt      DateTime?
   createdAt            DateTime            @default(now())
   updatedAt            DateTime            @updatedAt
 
@@ -177,6 +183,7 @@ model UploadSession {
   @@index([status, completionLeaseUntil])
   @@index([userId, createdAt])
   @@index([status, updatedAt, id])
+  @@index([cleanupLeaseUntil, id])
 }
 
 model UploadPart {

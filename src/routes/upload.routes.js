@@ -24,7 +24,8 @@ const {
   recoverStaleCompletion,
   isStaleCompletion,
   expireIfNeeded,
-  cleanupUploadSessions
+  cleanupUploadSessions,
+  getUploadCleanupStats
 } = require("../lib/upload-session");
 const { retryOnConflict } = require("../lib/db-retry");
 const { pruneMetadata } = require("../lib/metadata-retention");
@@ -124,6 +125,13 @@ async function uploadRoutes(app) {
   async function sweepUploadAndMetadata() {
     try {
       await cleanupUploadSessions(storage);
+      const stats = getUploadCleanupStats();
+      if (stats?.failures > 0) {
+        app.log.warn({ cleanup: stats }, "Upload cleanup backlog has failures");
+      } else if (stats?.claimed > 0 || stats?.terminal > 0 ||
+        stats?.pendingBacklog > 0 || stats?.terminalBacklog > 0) {
+        app.log.info({ cleanup: stats }, "Upload cleanup sweep progress");
+      }
     } catch (error) {
       app.log.warn({ err: error }, "Resumable-upload cleanup failed");
     }

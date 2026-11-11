@@ -88,6 +88,11 @@ jobs:
       - name: Unit and integration tests
         run: npm test
 
+      - name: Ten-thousand-session cleanup backlog and two-worker gate
+        env:
+          VAULTBOX_RUN_LARGE_CLEANUP_TEST: "true"
+        run: node --test test/upload-cleanup-worker.integration.test.js
+
       - name: Benchmark
         run: npm run benchmark | tee benchmark.json
 
