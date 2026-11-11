@@ -22,6 +22,8 @@ const {
 const { lockActiveUserForUpdate } = require("../lib/upload-session");
 const { assertOwnedFolderLocked } = require("../lib/folder-ownership");
 const { retryOnConflict } = require("../lib/db-retry");
+const { reserveTemporary, startTempHeartbeat, assertTemporaryOwned,
+  releaseTemporary, ensurePhysicalHeadroom } = require("../lib/temporary-storage");
 const { decodeCursor, cursorWhere, cursorOrderBy, finishCursorPage } = require("../lib/pagination");
 
 const fileCursorTypes = {
@@ -159,18 +161,46 @@ async function fileRoutes(app) {
     const originalName = String(data.filename || "upload").slice(0, 255);
     const mimeType = String(data.mimetype || "application/octet-stream").slice(0, 255);
     const storedName = crypto.randomUUID();
+    const tempKey = "file:" + storedName;
+    let tempClaim;
+    try {
+      // Headerless one-shot uploads reserve the configured maximum, since their
+      // actual size is not known until after streaming (and must still be capped).
+      await ensurePhysicalHeadroom(storage,
+        expectedSize === null ? BigInt(app.vaultboxConfig.maxUploadBytes) : expectedSize);
+      tempClaim = await reserveTemporary({
+        userId: user.id, objectKey: tempKey, kind: "FILE",
+        bytes: expectedSize === null ? BigInt(app.vaultboxConfig.maxUploadBytes) : expectedSize,
+        leaseMs
+      });
+    } catch (error) {
+      await releaseEarlyReservation();
+      if (error.code === "TEMP_STORAGE_BUDGET_EXCEEDED") {
+        return reply.code(507).send({ message: "Temporary upload storage is at capacity" });
+      }
+      throw error;
+    }
+    const tempHeartbeat = startTempHeartbeat(tempKey, tempClaim.token, leaseMs);
+    const removeTempBytes = async () => {
+      tempHeartbeat.stop();
+      const removed = await storage.delete(storedName).then(() => true).catch(() => false);
+      if (removed) await releaseTemporary(tempKey, tempClaim.token).catch(() => null);
+    };
     const hasher = new HashingTransform("sha256");
 
     try {
       await pipeline(data.file, hasher, storage.createWriteStream(storedName));
     } catch (error) {
-      await storage.delete(storedName).catch(() => false);
+      await removeTempBytes();
       await releaseEarlyReservation();
+      if (error.code === "ENOSPC" || error.code === "EDQUOT") {
+        return reply.code(507).send({ message: "Temporary storage is full; retry later" });
+      }
       throw error;
     }
 
     if (data.file.truncated) {
-      await storage.delete(storedName).catch(() => false);
+      await removeTempBytes();
       await releaseEarlyReservation();
       return reply.code(413).send({ message: "Upload exceeds its declared or configured file-size limit" });
     }
@@ -178,7 +208,7 @@ async function fileRoutes(app) {
     const fileSize = hasher.bytes;
     const checksum = hasher.digest();
     if (expectedSize !== null && fileSize !== expectedSize) {
-      await storage.delete(storedName).catch(() => false);
+      await removeTempBytes();
       await releaseEarlyReservation();
       return reply.code(422).send({
         message: "Uploaded byte count does not match x-upload-size",
@@ -196,6 +226,7 @@ async function fileRoutes(app) {
         // Account-state fence at the commit point: a suspension that landed while the body streamed
         // rejects the commit (403) and the bytes + reservation are given back by the catch below.
         await lockActiveUserForUpdate(tx, user.id);
+        await assertTemporaryOwned(tx, tempKey, tempClaim.token);
         const reservation = expectedSize === null
           ? await reserveUploadQuota(user.id, fileSize, tx)
           : await commitReservation(tx, reservationId, user.id, fileSize);
@@ -240,9 +271,13 @@ async function fileRoutes(app) {
       file = committed.file;
       admittedQuota = committed.reservation;
       heartbeat?.stop();
+      tempHeartbeat.stop();
+      await releaseTemporary(tempKey, tempClaim.token).catch((error) =>
+        request.log.warn({ err: error }, "Committed file temporary ledger release delayed")
+      );
       reservationId = null; // converted atomically with the file; nothing left to release
     } catch (error) {
-      await storage.delete(storedName).catch(() => false);
+      await removeTempBytes();
       await releaseEarlyReservation();
 
       if (error.code === "STORAGE_QUOTA_EXCEEDED") {

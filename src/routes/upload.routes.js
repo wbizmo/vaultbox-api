@@ -30,6 +30,9 @@ const {
 const { retryOnConflict } = require("../lib/db-retry");
 const { pruneMetadata } = require("../lib/metadata-retention");
 const { assertOwnedFolderLocked } = require("../lib/folder-ownership");
+const { claimTemporary, reserveTemporary, startTempHeartbeat,
+  releaseTemporary, ensurePhysicalHeadroom } = require("../lib/temporary-storage");
+const { reconcileStorage } = require("../lib/storage-reconciliation");
 const { throttlePreHandler } = require("../lib/throttle");
 
 const createThrottle = throttlePreHandler(
@@ -141,6 +144,16 @@ async function uploadRoutes(app) {
     } catch (error) {
       app.log.warn({ err: error }, "Transfer metadata pruning failed");
     }
+    try {
+      const report = await reconcileStorage(storage);
+      if (report.errors || report.missingCommittedObjects || report.unclaimedLegacyObjects) {
+        app.log.warn({ report }, "Storage reconciliation discrepancies require review");
+      } else if (report.reaped) {
+        app.log.info({ report }, "Stale temporary storage reconciled");
+      }
+    } catch (error) {
+      app.log.warn({ err: error }, "Storage reconciliation failed");
+    }
   }
 
   app.addHook("onReady", sweepUploadAndMetadata);
@@ -189,6 +202,14 @@ async function uploadRoutes(app) {
     if (!user?.planId) return reply.code(403).send({ message: "No active storage plan found" });
 
     const sessionId = crypto.randomUUID();
+    try {
+      await ensurePhysicalHeadroom(storage, expectedSize * 2n);
+    } catch (error) {
+      if (error.code === "TEMP_STORAGE_BUDGET_EXCEEDED") {
+        return reply.code(507).send({ message: "Not enough physical space for upload assembly" });
+      }
+      throw error;
+    }
     await storage.prepareUploadSession(sessionId);
 
     let session;
@@ -196,6 +217,12 @@ async function uploadRoutes(app) {
       session = await prisma.$transaction(async (tx) => {
         await lockActiveUserForUpdate(tx, request.user.id);
         await assertOwnedFolderLocked(tx, request.user.id, request.body.folderId);
+        // Parts and the assembled output may coexist: reserve 2x expected bytes.
+        await claimTemporary({
+          userId: request.user.id, objectKey: "session:" + sessionId,
+          kind: "SESSION", bytes: expectedSize * 2n,
+          leaseMs: (config.uploadSessionExpiresMinutes + 5) * 60000
+        }, tx);
         const reservation = await reservePendingUploadQuota(request.user.id, expectedSize, tx);
         if (!reservation) {
           const error = new Error("Storage quota exceeded");
@@ -229,6 +256,9 @@ async function uploadRoutes(app) {
       await storage.deleteUploadSessionChunks(sessionId).catch(() => {});
       if (error.code === "STORAGE_QUOTA_EXCEEDED") {
         return reply.code(413).send({ message: "Storage quota exceeded" });
+      }
+      if (error.code === "TEMP_STORAGE_BUDGET_EXCEEDED") {
+        return reply.code(507).send({ message: "Temporary upload storage is at capacity" });
       }
       throw error;
     }
@@ -398,6 +428,9 @@ async function uploadRoutes(app) {
       await pipeline(data.file, hasher, storage.createUploadPartWriteStream(session.id, storedName));
     } catch (error) {
       await storage.deleteUploadPart(session.id, storedName).catch(() => false);
+      if (error.code === "ENOSPC" || error.code === "EDQUOT") {
+        return reply.code(507).send({ message: "Temporary upload storage is full; retry this part" });
+      }
       if (error.code === "ENOENT") {
         // The session's chunk directory vanished: it was aborted, expired or completed while
         // this body was streaming. That is a conflict, not a server error.
@@ -527,13 +560,49 @@ async function uploadRoutes(app) {
     // so a stalled or recovered ("zombie") completer can never publish a file.
     const heartbeat = startLeaseHeartbeat(session.id, token, leaseMs);
     const giveBack = () => relinquishCompletion(session.id, token).catch(() => false);
+    try {
+      await ensurePhysicalHeadroom(storage, BigInt(session.expectedSize));
+    } catch (error) {
+      heartbeat.stop();
+      await giveBack();
+      if (error.code === "TEMP_STORAGE_BUDGET_EXCEEDED") {
+        return reply.code(507).send({ message: "Not enough physical space to assemble upload" });
+      }
+      throw error;
+    }
     const storedName = crypto.randomUUID();
+    const assemblyKey = "assembly:" + storedName;
+    let assemblyClaim;
+    try {
+      assemblyClaim = await reserveTemporary({
+        userId: request.user.id, objectKey: assemblyKey, kind: "ASSEMBLY",
+        // Accounted for by the session's existing 2x reservation.
+        bytes: 0n, leaseMs: Math.max(120000, leaseMs)
+      });
+    } catch (error) {
+      heartbeat.stop();
+      await giveBack();
+      if (error.code === "TEMP_STORAGE_BUDGET_EXCEEDED") {
+        return reply.code(507).send({ message: "Concurrent temporary object limit reached" });
+      }
+      throw error;
+    }
+    const assemblyHeartbeat = startTempHeartbeat(assemblyKey, assemblyClaim.token, Math.max(120000, leaseMs));
+    const deleteAbandonedAssembly = async () => {
+      assemblyHeartbeat.stop();
+      const removed = await storage.delete(storedName).then(() => true).catch(() => false);
+      if (removed) await releaseTemporary(assemblyKey, assemblyClaim.token).catch(() => null);
+    };
     let assembled;
     try {
       assembled = await storage.assembleUploadParts(session.id, session.parts, storedName, { signal: app.vaultboxShutdownSignal });
     } catch (error) {
       heartbeat.stop();
+      await deleteAbandonedAssembly();
       await giveBack();
+      if (error.code === "ENOSPC" || error.code === "EDQUOT") {
+        return reply.code(507).send({ message: "Assembly storage is full; upload remains retryable" });
+      }
       if (error.name === "AbortError") {
         // Shutdown began mid-assembly: the partial object is gone and the session is retryable.
         reply.header("Retry-After", "5");
@@ -559,13 +628,13 @@ async function uploadRoutes(app) {
 
     if (assembled.size !== BigInt(session.expectedSize)) {
       heartbeat.stop();
-      await storage.delete(storedName).catch(() => false);
+      await deleteAbandonedAssembly();
       await giveBack();
       return reply.code(422).send({ message: "Assembled upload size mismatch" });
     }
     if (session.expectedChecksum && assembled.checksum !== session.expectedChecksum) {
       heartbeat.stop();
-      await storage.delete(storedName).catch(() => false);
+      await deleteAbandonedAssembly();
       await giveBack();
       return reply.code(422).send({ message: "Final upload checksum mismatch" });
     }
@@ -628,7 +697,7 @@ async function uploadRoutes(app) {
       }));
     } catch (error) {
       heartbeat.stop();
-      await storage.delete(storedName).catch(() => false);
+      await deleteAbandonedAssembly();
       if (error.code === "UPLOAD_COMPLETION_LEASE_LOST") {
         // Someone else now owns (or has finished) this session; touch nothing of theirs.
         return reply.code(409).send({ message: "Upload completion lease was lost; retry completion" });
@@ -637,10 +706,22 @@ async function uploadRoutes(app) {
       throw error;
     }
     heartbeat.stop();
+    assemblyHeartbeat.stop();
+    // File row and bytes committed: this object is now durable, not temporary.
+    await releaseTemporary(assemblyKey, assemblyClaim.token).catch((error) =>
+      request.log.warn({ err: error }, "Assembly ledger cleanup delayed")
+    );
 
-    await storage.deleteUploadSessionChunks(session.id).catch((error) => {
+    try {
+      await storage.deleteUploadSessionChunks(session.id);
+      await prisma.uploadSession.updateMany({
+        where: { id: session.id, status: "COMPLETED" },
+        data: { chunksCleanedAt: new Date() }
+      });
+      await releaseTemporary("session:" + session.id);
+    } catch (error) {
       request.log.warn({ err: error, sessionId: session.id }, "Upload committed but chunk cleanup failed");
-    });
+    }
     return {
       message: "Upload completed",
       sessionId: session.id,
@@ -660,6 +741,19 @@ async function uploadRoutes(app) {
     };
   });
 
+  async function cleanupTerminalSession(session) {
+    try {
+      await storage.deleteUploadSessionChunks(session.id);
+      await prisma.uploadSession.updateMany({
+        where: { id: session.id, status: { in: ["ABORTED", "EXPIRED", "COMPLETED"] } },
+        data: { chunksCleanedAt: new Date() }
+      });
+      await releaseTemporary("session:" + session.id);
+    } catch (error) {
+      app.log.warn({ err: error }, "Terminal upload byte cleanup deferred to worker");
+    }
+  }
+
   app.delete("/upload-sessions/:id", {
     preHandler: requireAuth,
     schema: {
@@ -674,7 +768,7 @@ async function uploadRoutes(app) {
       return reply.code(409).send({ message: "Completed uploads cannot be aborted" });
     }
     if (session.status === "ABORTED" || session.status === "EXPIRED") {
-      await storage.deleteUploadSessionChunks(session.id).catch(() => {});
+      await cleanupTerminalSession(session);
       return { message: `Upload session is already ${session.status.toLowerCase()}` };
     }
     if (session.status !== "UPLOADING") {
@@ -692,7 +786,7 @@ async function uploadRoutes(app) {
       })
     });
     if (!aborted) return reply.code(409).send({ message: "Upload session state changed concurrently" });
-    await storage.deleteUploadSessionChunks(session.id).catch(() => {});
+    await cleanupTerminalSession(session);
     return { message: "Upload session aborted" };
   });
 }

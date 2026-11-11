@@ -3,6 +3,7 @@ const prisma = require("./prisma");
 const { releaseUploadReservation } = require("./quota");
 const { retryOnConflict } = require("./db-retry");
 const { AppError } = require("./errors");
+const { releaseTemporary } = require("./temporary-storage");
 
 /*
  * Lock acquisition order (documented invariant, see docs/UPLOADS.md):
@@ -322,7 +323,18 @@ async function recoverStaleCompletion(session, client = prisma) {
 async function expireIfNeeded(session, storage, client = prisma) {
   if (session.status !== "UPLOADING" || session.expiresAt > new Date()) return false;
   const expired = await releaseSession(session, "EXPIRED", client);
-  if (expired) await storage.deleteUploadSessionChunks(session.id).catch(() => {});
+  if (expired) {
+    try {
+      await storage.deleteUploadSessionChunks(session.id);
+      await client.uploadSession.updateMany({
+        where: { id: session.id, status: "EXPIRED" },
+        data: { chunksCleanedAt: new Date() }
+      });
+      await releaseTemporary("session:" + session.id, null, client);
+    } catch {
+      // Session is closed; the leased cleanup worker retries physical bytes.
+    }
+  }
   return expired;
 }
 
@@ -469,6 +481,7 @@ async function cleanupUploadSessions(storage, client = prisma, overrides = {}) {
       stats.expired++;
       await deleteChunksWithTimeout(storage, session.id, settings.deleteTimeoutMs);
       await finishCleanupClaim(client, session.id, expired.token, { completed: true });
+      await releaseTemporary("session:" + session.id, null, client);
     } catch {
       stats.failures++;
       stats.retried++;
@@ -483,6 +496,7 @@ async function cleanupUploadSessions(storage, client = prisma, overrides = {}) {
     try {
       await deleteChunksWithTimeout(storage, session.id, settings.deleteTimeoutMs);
       await finishCleanupClaim(client, session.id, terminal.token, { completed: true });
+      await releaseTemporary("session:" + session.id, null, client);
       stats.terminal++;
     } catch {
       stats.failures++;

@@ -140,3 +140,7 @@ See [`docs/RELEASE_NOTES_v2.2.0.md`](./docs/RELEASE_NOTES_v2.2.0.md) for behavio
 ## [1.0.0] - 2026-06-18
 
 Initial production release with authentication, plans and quotas, file/folder operations, signed downloads, administration, billing simulation, PostgreSQL persistence, Redis integration, health monitoring, and Swagger/OpenAPI documentation.
+
+## [2.5.0] — Unreleased (consolidated v2.3–v2.5 draft PR #88)
+
+Includes shared-storage tooling (provider unverified), durable temp-byte admission/orphan reconciliation, cleanup/retention, real HTTP and PostgreSQL benchmarks, 10k-part pagination, independent-process security/fault testing, manually gated releases, folder-aware uploads and accurate reserved quota reporting. See \`docs/RELEASE_NOTES_v2.5.0.md\`. Do not treat this section as a shipped release.

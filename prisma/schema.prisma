@@ -265,6 +265,25 @@ model UploadReservation {
   @@index([userId, state])
 }
 
+// Temporary bytes are admitted transactionally before an upload may touch the object store.
+// Claims remain charged until published File bytes or abandoned physical objects are reconciled.
+// No foreign-key cascade: deletion of an account cannot silently erase cleanup evidence.
+model TemporaryObject {
+  id         String   @id @default(cuid())
+  userId     String
+  objectKey  String   @unique
+  kind       String
+  bytes      BigInt
+  state      String   @default("ACTIVE")
+  token      String
+  leaseUntil DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([userId, state])
+  @@index([state, leaseUntil])
+}
+
 // Durable, actor-scoped idempotency for create operations. The claim and the business mutation commit
 // in ONE transaction, so there is no visible "pending" state to expire or overwrite: a committed row
 // means the operation happened and `response` is its result.

@@ -85,8 +85,24 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Unit and integration tests
-        run: npm test
+      - name: Static credential and secret security scan
+        run: npm run security:scan
+
+      - name: Full unit, integration, BOLA, crash and multipart fault suite
+        run: |
+          set +e
+          npm test > test-output.raw.log 2>&1
+          code=$?
+          set -e
+          node scripts/redact-test-artifacts.js test-output.raw.log test-output.redacted.log
+          cat test-output.redacted.log
+          rm -f test-output.raw.log
+          exit "$code"
+
+      - name: Explicit independent-process and malformed multipart regression gate
+        run: |
+          node --test test/distributed-fault-gates.integration.test.js
+          node --test test/temporary-storage.integration.test.js test/multipart-fuzz.integration.test.js
 
       - name: Ten-thousand-session cleanup backlog and two-worker gate
         env:
@@ -112,4 +128,5 @@ jobs:
             transfer-benchmark.json
             query-benchmark.json
             dependency-audit.json
+            test-output.redacted.log
           retention-days: 30

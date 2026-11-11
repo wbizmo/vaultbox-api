@@ -1,6 +1,6 @@
 {
   "name": "vaultbox-api",
-  "version": "2.2.0",
+  "version": "2.5.0",
   "description": "Secure cloud storage API with resumable chunked uploads, range downloads, atomic quota enforcement, Redis coordination, audit logs, and administrative controls.",
   "main": "src/server.js",
   "scripts": {
@@ -14,7 +14,8 @@
     "seed": "node prisma/seed.js",
     "deploy:generate": "prisma generate",
     "benchmark:transfers": "node scripts/benchmark-transfers.js",
-    "benchmark:queries": "node scripts/profile-postgres.js"
+    "benchmark:queries": "node scripts/profile-postgres.js",
+    "security:scan": "node scripts/security-static-check.js"
   },
   "keywords": [
     "cloud-storage",

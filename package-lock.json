@@ -1,12 +1,12 @@
 {
   "name": "vaultbox-api",
-  "version": "2.2.0",
+  "version": "2.5.0",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "vaultbox-api",
-      "version": "2.2.0",
+      "version": "2.5.0",
       "license": "MIT",
       "dependencies": {
         "@aws-sdk/client-s3": "3.1165.0",
