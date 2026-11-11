@@ -11,9 +11,10 @@ permissions:
   contents: read
   security-events: write
 
-# One live run per PR branch, cancel superseded SHA checks to save CI minutes.
+# Cancel superseded SHA runs within the same event type. Draft synchronize
+# events must never cancel an independently launched ready_for_review run.
 concurrency:
-  group: vaultbox-ci-${{ github.event.pull_request.number || github.ref }}
+  group: vaultbox-ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event.action || 'push' }}
   cancel-in-progress: true
 
 jobs:
