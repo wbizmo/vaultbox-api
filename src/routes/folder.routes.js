@@ -98,7 +98,8 @@ async function folderRoutes(app) {
           pagination: { type: "string", enum: ["page", "cursor"] },
           page: { type: "integer", minimum: 1, maximum: 100 },
           cursor: { type: "string", maxLength: 1024 },
-          limit: { type: "integer", minimum: 1, maximum: 100 }
+          limit: { type: "integer", minimum: 1, maximum: 100 },
+          includeTotal: { type: "boolean", description: "Page mode: false skips the exact total count and returns a bounded hasMore page." }
         }
       }
     }
@@ -126,6 +127,23 @@ async function folderRoutes(app) {
       });
       const result = finishCursorPage(rows, limit, folderCursorOptions);
       return { folders: result.items, pagination: { ...result.pagination, limit } };
+    }
+
+    if (request.query.includeTotal === false) {
+      const rows = await prisma.folder.findMany({
+        where,
+        include: { _count: { select: { files: true } } },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        skip: (page - 1) * limit,
+        take: limit + 1
+      });
+      return {
+        folders: rows.slice(0, limit),
+        pagination: {
+          mode: "page", page, limit, total: null, pages: null,
+          hasMore: rows.length > limit
+        }
+      };
     }
 
     const [total, folders] = await prisma.$transaction([

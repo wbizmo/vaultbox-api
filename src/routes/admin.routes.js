@@ -50,6 +50,7 @@ async function adminRoutes(app) {
           page: { type: "integer", minimum: 1, maximum: 100 },
           cursor: { type: "string", maxLength: 1024 },
           limit: { type: "integer", minimum: 1, maximum: 100 },
+          includeTotal: { type: "boolean", description: "Page mode: false skips exact totals; defaults true for compatibility." },
           status: { type: "string", enum: ["ACTIVE", "SUSPENDED", "DELETED"] },
           search: { type: "string", maxLength: 120 }
         }
@@ -88,6 +89,23 @@ async function adminRoutes(app) {
       return {
         users: result.items.map(serializeAdminUser),
         pagination: { ...result.pagination, limit }
+      };
+    }
+
+    if (request.query.includeTotal === false) {
+      const rows = await prisma.user.findMany({
+        where: baseWhere,
+        include: { plan: true },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        skip: (page - 1) * limit,
+        take: limit + 1
+      });
+      return {
+        users: rows.slice(0, limit).map(serializeAdminUser),
+        pagination: {
+          mode: "page", page, limit, total: null, pages: null,
+          hasMore: rows.length > limit
+        }
       };
     }
 

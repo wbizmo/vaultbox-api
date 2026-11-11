@@ -94,6 +94,9 @@ jobs:
       - name: Real HTTP transfer and database benchmark
         run: npm run benchmark:transfers | tee transfer-benchmark.json
 
+      - name: PostgreSQL query plans and optional count benchmark
+        run: npm run benchmark:queries | tee query-benchmark.json
+
       - name: Upload engineering evidence
         if: always()
         uses: actions/upload-artifact@v6
@@ -102,5 +105,6 @@ jobs:
           path: |
             benchmark.json
             transfer-benchmark.json
+            query-benchmark.json
             dependency-audit.json
           retention-days: 30

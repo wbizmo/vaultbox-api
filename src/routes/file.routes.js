@@ -290,6 +290,7 @@ async function fileRoutes(app) {
           page: { type: "integer", minimum: 1, maximum: 100 },
           cursor: { type: "string", maxLength: 1024 },
           limit: { type: "integer", minimum: 1, maximum: 100 },
+          includeTotal: { type: "boolean", description: "Page mode only: default true; false skips the potentially expensive count and returns total/pages null with hasMore." },
           search: { type: "string", maxLength: 120 },
           folderId: { type: "string", minLength: 1, maxLength: 255, description: "Owned folder ID or root for files without a folder" },
           sort: { type: "string", enum: ["createdAt", "updatedAt", "size", "originalName"] },
@@ -332,6 +333,25 @@ async function fileRoutes(app) {
       return {
         files: result.items.map(serializeFile),
         pagination: { ...result.pagination, limit }
+      };
+    }
+
+    if (request.query.includeTotal === false) {
+      // A single bounded indexed query avoids an O(matching rows) count,
+      // preserving the legacy count behavior unless clients explicitly opt out.
+      const rows = await prisma.file.findMany({
+        where: baseWhere,
+        orderBy: [{ [sort]: order }, { id: order }],
+        skip: (page - 1) * limit,
+        take: limit + 1
+      });
+      return {
+        files: rows.slice(0, limit).map(serializeFile),
+        pagination: {
+          mode: "page", page, limit,
+          total: null, pages: null,
+          hasMore: rows.length > limit
+        }
       };
     }
 
