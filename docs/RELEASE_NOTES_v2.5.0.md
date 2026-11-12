@@ -1,6 +1,6 @@
-# VaultBox v2.5.0 — Draft consolidated release notes (UNRELEASED)
+# VaultBox v2.5.0
 
-**Status:** Engineering implementation in review in draft PR #88. No release tag has been published and production has not been switched to this version.
+**Status:** DRAFT RELEASE NOTES — engineering implementation in review in PR #88. No release tag has been published and production has not been switched to this version.
 
 ## Cumulative changes since v2.2.0
 
@@ -13,11 +13,15 @@ All existing v2.2.0 security, account, rate-limit, audit and quota contracts rem
 
 ## Compatibility
 
-- \`GET /files\`, \`GET /folders\`, admin pagination preserve original count responses unless the caller requests \`includeTotal=false\`.
+- `GET /files`, `GET /folders`, admin pagination preserve original count responses unless the caller requests `includeTotal=false`.
 - Upload progress preserves the legacy response by default; bounded summary/page modes are opt-in.
 - Uploads can specify an owned folder; cross-user folder/file identifiers remain rejected.
 - One-shot writes may now return HTTP 507 if temporary/disk capacity cannot safely admit them; declared and headerless limits are enforced.
 - Run additive Prisma migrations *before* starting the new API and execute Prisma generation at build time. The runtime startup no longer downloads executables or runs database migration.
+
+## CodeRabbit review remediations
+
+The review corrective batch addresses temporary ASSEMBLY concurrency-slot deadlocks, S3 orphan-claim fencing and deferred remote verification, stable legacy File ID + stored-name hashing for optional S3 migration (with dry-run File ID reporting), deterministic conditional-write readiness tests, accurate ranged-download throughput accounting, and documentation/.env examples. S3 remains optional and unconfigured, and production-specific S3 acceptance remains **UNVERIFIED**. Added the CodeQL flagged fixed-field file sorting, production-safe profiling opt-in, release-heading validation, credential scanner hardening, guaranteed raw CI-log deletion and a concurrent stored-name index; operational index-window and code-scanning ruleset requirements remain documented in the deployment guide.
 
 ## Explicit unverified provider exception
 
@@ -27,8 +31,8 @@ All existing v2.2.0 security, account, rate-limit, audit and quota contracts rem
 
 - Verify complete local Node 24.22.2, PostgreSQL 16, Redis 7, lint, audit, integration, fault, performance and rollback/forward compatibility evidence on the exact final commit.
 - Run CodeQL v4 security-extended analysis on the exact reviewed commit; this is configured in the existing single CI verify runner and skipped while the PR is draft (CodeQL cannot be accurately claimed as locally executed). Complete CodeRabbit/human review and reconcile every linked issue's acceptance criteria except the explicitly documented provider exception.
-- Configure Render's separate build-time Prisma generate and approved migration stage before any merge (current production uses \`npm start\` migrations).
-- Configure required human reviewers for the GitHub \`vaultbox-release\` environment, disable unintended automatic deployment for this migration, take backups, rehearse rollback and live smoke tests.
+- Configure Render's separate build-time Prisma generate and approved migration stage before any merge (current production uses `npm start` migrations).
+- Configure required human reviewers for the GitHub `vaultbox-release` environment, disable unintended automatic deployment for this migration, take backups, rehearse rollback and live smoke tests.
 - After explicit approval: merge, run protected-main CI at the exact SHA, intentionally dispatch the release gate, verify production deployment and record evidence in epic #66 and tracker #68. No automated publishing from a draft PR.
 
 ## Review-ready CI gate (not a production release)

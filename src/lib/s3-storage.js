@@ -129,6 +129,26 @@ class S3StorageAdapter {
     return this.prefix + "objects/" + key;
   }
 
+  // Old local installations may have nested, spaced or otherwise non-UUID
+  // storedName values. Never pass those names through the strict new-upload
+  // key API or interpolate them into arbitrary S3 prefixes. A deterministic
+  // one-way mapping retains the DB storedName without renaming user files.
+  objectKeyForFile(file) {
+    const name = file?.storedName;
+    if (typeof name !== "string" || !name || name.includes("\\0")) {
+      throw new Error("Stored file key is missing or invalid");
+    }
+    if (SAFE_KEY.test(name)) return this.objectKey(name);
+    // Multiple legacy File rows may share a local path. Bind the remote key to
+    // the immutable DB File ID too, so deleting one tenant's migrated object
+    // never deletes another tenant's object.
+    if (typeof file.id !== "string" || !file.id) {
+      throw new Error("Legacy storage key requires a File ID");
+    }
+    return this.prefix + "objects/legacy/" +
+      crypto.createHash("sha256").update(file.id + "\0" + name, "utf8").digest("hex");
+  }
+
   partKey(sessionId, storedName) {
     if (!SAFE_SESSION.test(String(sessionId))) throw new Error("Invalid upload session id");
     if (!SAFE_KEY.test(String(storedName))) throw new Error("Invalid upload part key");
@@ -191,6 +211,10 @@ class S3StorageAdapter {
     return this.writerForKey(this.objectKey(key));
   }
 
+  createWriteStreamForFile(file) {
+    return this.writerForKey(this.objectKeyForFile(file));
+  }
+
   createUploadPartWriteStream(sessionId, storedName) {
     return this.writerForKey(this.partKey(sessionId, storedName));
   }
@@ -218,7 +242,7 @@ class S3StorageAdapter {
 
   async openReadStreamForFile(file, options = {}) {
     if (!file?.storedName) throw new Error("Stored file key is missing");
-    return this.openReadStream(this.objectKey(file.storedName), options);
+    return this.openReadStream(this.objectKeyForFile(file), options);
   }
 
   async exists(key) {
@@ -227,7 +251,7 @@ class S3StorageAdapter {
 
   async existsFile(file) {
     if (!file?.storedName) return false;
-    return this.exists(file.storedName);
+    return this.existsKey(this.objectKeyForFile(file));
   }
 
   async existsUploadPart(sessionId, storedName) {
@@ -244,6 +268,23 @@ class S3StorageAdapter {
     }
   }
 
+  // HEAD is the only provider call required to age-check a claimed object.
+  // No bucket-wide inventory permissions are needed to reconcile FILE/ASSEMBLY.
+  async objectLastModified(key) {
+    try {
+      const response = await this.client.send(new HeadObjectCommand({
+        Bucket: this.bucket, Key: this.objectKey(key)
+      }));
+      if (!response.LastModified) throw new Error("S3 object LastModified unavailable; refusing orphan deletion");
+      const value = new Date(response.LastModified);
+      if (!Number.isFinite(value.getTime())) throw new Error("Invalid S3 object LastModified");
+      return value;
+    } catch (error) {
+      if (isMissing(error)) return null;
+      throw error;
+    }
+  }
+
   async stat(key) {
     const response = await this.client.send(new HeadObjectCommand({
       Bucket: this.bucket, Key: this.objectKey(key)
@@ -252,7 +293,7 @@ class S3StorageAdapter {
   }
 
   async delete(key) { return this.deleteKey(this.objectKey(key)); }
-  async deleteFile(file) { return this.delete(file.storedName); }
+  async deleteFile(file) { return this.deleteKey(this.objectKeyForFile(file)); }
   async deleteUploadPart(sessionId, storedName) {
     return this.deleteKey(this.partKey(sessionId, storedName));
   }

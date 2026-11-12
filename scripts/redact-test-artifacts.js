@@ -1,4 +1,4 @@
-"use strict";
+// @ts-check\n"use strict";
 const fs=require("node:fs");
 const {redactEvidence}=require("./security-static-check");
 const [input,output]=process.argv.slice(2);

@@ -114,13 +114,15 @@ jobs:
 
       - name: Full unit, integration, BOLA, crash and multipart fault suite
         run: |
+          set -euo pipefail
+          # Remove potentially sensitive raw logs even when redaction fails.
+          trap 'rm -f test-output.raw.log' EXIT
           set +e
           npm test -- --experimental-test-coverage > test-output.raw.log 2>&1
           code=$?
           set -e
           node scripts/redact-test-artifacts.js test-output.raw.log test-output.redacted.log
           cat test-output.redacted.log
-          rm -f test-output.raw.log
           exit "$code"
 
       - name: Explicit independent-process and malformed multipart regression gate
@@ -144,6 +146,8 @@ jobs:
           npm run benchmark:transfers | tee transfer-benchmark.json
 
       - name: PostgreSQL query plans and optional count benchmark
+        env:
+          VAULTBOX_QUERY_PROFILE_ALLOW_WRITES: "1"
         run: |
           set -euo pipefail
           npm run benchmark:queries | tee query-benchmark.json

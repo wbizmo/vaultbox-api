@@ -262,3 +262,143 @@ test("unknown legacy object inventory advances beyond batch-size without deletin
     "the scanner must advance its directory cursor rather than repeatedly inspect its first page");
   for(const key of keys)assert.equal(await f.storage.exists(key),true);
 });
+
+test("zero-byte assembly fences do not exhaust claim-count capacity reserved by sessions", async t => {
+  const tag = crypto.randomUUID();
+  const baseline = await tempStats();
+  const limits = {
+    globalBytes: BigInt(baseline.reservedBytes) + 100n,
+    userBytes: 100n, globalClaims: baseline.objects + 1, userClaims: 1
+  };
+  const owner = "assembly-cap-" + tag;
+  const sessionKey = "session:" + tag;
+  const assemblyKey = "assembly:" + tag;
+  t.after(() => prisma.temporaryObject.deleteMany({ where: { objectKey: { in: [sessionKey, assemblyKey] } } }));
+  await reserveTemporary({ userId: owner, objectKey: sessionKey, kind: "SESSION", bytes: 60n, limits });
+  const assembly = await reserveTemporary({
+    userId: owner, objectKey: assemblyKey, kind: "ASSEMBLY", bytes: 0n, limits
+  });
+  assert.equal(typeof assembly.token, "string");
+  await assert.rejects(reserveTemporary({
+    userId: owner, objectKey: "file:" + tag, kind: "FILE", bytes: 1n, limits
+  }), { code: "TEMP_STORAGE_BUDGET_EXCEEDED" });
+  await releaseTemporary(assemblyKey);
+  await releaseTemporary(sessionKey);
+});
+
+test("S3 stale claims are fenced, deleted, and verified on separate grace periods before budget release", async t => {
+  const { S3StorageAdapter } = require("../src/lib/s3-storage");
+  const { HeadObjectCommand, DeleteObjectCommand } = require("@aws-sdk/client-s3");
+  const f = await fixture(t);
+  const key = crypto.randomUUID(), old = new Date(Date.now() - 4 * 3600000);
+  const objects = new Map([["objects/" + key, { timestamp: old }]]);
+  const fake = { send: async (cmd) => {
+    const name = cmd.constructor.name, k = cmd.input.Key;
+    if (name === HeadObjectCommand.name) {
+      const obj = objects.get(k);
+      if (!obj) {
+        const e = new Error("not found"); e.name = "NotFound"; throw e;
+      }
+      return { ContentLength: 20, LastModified: obj.timestamp };
+    }
+    if (name === DeleteObjectCommand.name) { objects.delete(k); return {}; }
+    throw new Error("Unexpected S3 command " + name);
+  }, destroy() {} };
+  const storage = new S3StorageAdapter({ client: fake, bucket: "fake", region: "us-east-1", prefix: "" });
+  const claim = await reserveTemporary({
+    userId: f.users[0].id, objectKey: "file:" + key, kind: "FILE", bytes: 20n
+  });
+  await prisma.temporaryObject.update({ where: { id: claim.id }, data: { leaseUntil: old } });
+  const opts = { graceMs: 60000, batchSize: 10 };
+  const first = await reconcileStorage(storage, prisma, opts);
+  assert.equal(first.supported, true);
+  assert.equal(first.reaped, 0);
+  assert.ok(objects.has("objects/" + key));
+  assert.equal((await prisma.temporaryObject.findUnique({ where: { id: claim.id } })).state, "REAPING");
+  await prisma.temporaryObject.update({ where: { id: claim.id }, data: { leaseUntil: old } });
+  const second = await reconcileStorage(storage, prisma, opts);
+  assert.equal(second.reaped, 0);
+  assert.equal(objects.has("objects/" + key), false);
+  assert.equal((await prisma.temporaryObject.findUnique({ where: { id: claim.id } })).state, "VERIFYING");
+  await prisma.temporaryObject.update({ where: { id: claim.id }, data: { leaseUntil: old } });
+  const third = await reconcileStorage(storage, prisma, opts);
+  assert.equal(third.reaped, 1);
+  assert.equal(await prisma.temporaryObject.findUnique({ where: { id: claim.id } }), null);
+});
+
+test("S3 stale claimed output associated with a durable File remains intact", async t => {
+  const { S3StorageAdapter } = require("../src/lib/s3-storage");
+  const f = await fixture(t), old = new Date(Date.now() - 4 * 3600000);
+  const key = crypto.randomUUID();
+  let deletes = 0;
+  const storage = new S3StorageAdapter({
+    bucket:"fake", region:"us-east-1", prefix:"", client:{
+      async send(cmd) {
+        if (cmd.constructor.name === "HeadObjectCommand") return { ContentLength: 3, LastModified: old };
+        if (cmd.constructor.name === "DeleteObjectCommand") { deletes++; return {}; }
+        throw Error("Unexpected provider command");
+      }, destroy() {}
+    }
+  });
+  const claim = await reserveTemporary({
+    userId:f.users[0].id,objectKey:"assembly:"+key,kind:"ASSEMBLY",bytes:0n
+  });
+  await prisma.file.create({data:{
+    userId:f.users[0].id,storedName:key,originalName:"durable.bin",
+    mimeType:"application/octet-stream",path:key,size:3n
+  }});
+  await prisma.temporaryObject.update({where:{id:claim.id},data:{leaseUntil:old}});
+  await reconcileStorage(storage,prisma,{graceMs:60000,batchSize:20});
+  assert.equal(deletes,0);
+  assert.equal(await prisma.temporaryObject.findUnique({where:{id:claim.id}}),null);
+});
+
+test("S3 cleanup keeps its claim when remote deletion fails, and rechecks a late upload", async t => {
+  const { S3StorageAdapter } = require("../src/lib/s3-storage");
+  const f = await fixture(t);
+  const key = crypto.randomUUID(), old = new Date(Date.now()-4*3600000);
+  const objects = new Map([["objects/"+key,old]]);
+  let failDelete=true, attempts=0;
+  const storage = new S3StorageAdapter({
+    bucket:"fake",region:"us-east-1",prefix:"",
+    client:{async send(cmd){
+      const k=cmd.input.Key;
+      if(cmd.constructor.name==="HeadObjectCommand"){
+        if(!objects.has(k)){const e=Error("not found");e.name="NotFound";throw e;}
+        return {ContentLength:8,LastModified:objects.get(k)};
+      }
+      if(cmd.constructor.name==="DeleteObjectCommand"){
+        attempts++;
+        if(failDelete){failDelete=false;throw Error("provider unavailable");}
+        objects.delete(k);return {};
+      }
+      throw Error("unexpected S3 command");
+    }}
+  });
+  const claim=await reserveTemporary({
+    userId:f.users[0].id,objectKey:"file:"+key,kind:"FILE",bytes:8n
+  });
+  const expire=()=>prisma.temporaryObject.update({where:{id:claim.id},data:{leaseUntil:old}});
+  const sweep=()=>reconcileStorage(storage,prisma,{graceMs:60000,batchSize:40});
+  await expire();await sweep();await expire();
+  const failed=await sweep();
+  assert.ok(failed.errors>=1);
+  assert.equal(attempts,1);
+  assert.ok(objects.has("objects/"+key));
+  assert.equal((await prisma.temporaryObject.findUnique({where:{id:claim.id}})).state,"REAPING");
+  await expire();await sweep();
+  assert.ok(!objects.has("objects/"+key));
+  assert.equal((await prisma.temporaryObject.findUnique({where:{id:claim.id}})).state,"VERIFYING");
+  objects.set("objects/"+key,new Date()); // late remote completion after initial deletion
+  await expire();const recent=await sweep();
+  assert.equal(recent.reaped,0);
+  assert.ok(await prisma.temporaryObject.findUnique({where:{id:claim.id}}));
+  objects.set("objects/"+key,old);
+  await expire();await sweep(); // advances back to REAPING
+  assert.equal((await prisma.temporaryObject.findUnique({where:{id:claim.id}})).state,"REAPING");
+  await expire();await sweep(); // deletes late object
+  assert.ok(!objects.has("objects/"+key));
+  await expire();const final=await sweep(); // final absence verification
+  assert.equal(final.reaped,1);
+  assert.equal(await prisma.temporaryObject.findUnique({where:{id:claim.id}}),null);
+});

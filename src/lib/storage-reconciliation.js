@@ -4,6 +4,7 @@ const fs = require("node:fs/promises");
 const crypto = require("node:crypto");
 const prisma = require("./prisma");
 const { LocalStorageAdapter } = require("./storage");
+const { S3StorageAdapter } = require("./s3-storage");
 const { tempStats } = require("./temporary-storage");
 
 function reconciliationSettings(env = process.env) {
@@ -67,7 +68,7 @@ async function recheckAndSweepClaim(storage, claim, cutoff, client, stats) {
     if (claim.kind !== "SESSION") {
       // Published object is no longer temporary; preserve bytes, drop stale claim.
       await client.temporaryObject.deleteMany({
-        where: { id: claim.id, token: claim.token, state: { in: ["ACTIVE", "REAPING"] } }
+        where: { id: claim.id, token: claim.token, state: { in: ["ACTIVE", "REAPING", "VERIFYING"] } }
       });
     }
     stats.protected++;
@@ -127,6 +128,108 @@ async function recheckAndSweepClaim(storage, claim, cutoff, client, stats) {
       where: { id: claim.id, state: "REAPING", token: reapToken },
       data: { state: "ACTIVE", leaseUntil: new Date(Date.now() + 300000) }
     }).catch(() => null);
+  }
+}
+
+// Remote object stores cannot expose an in-flight multipart PUT via HEAD. First
+// revoke an expired writer's claim; wait a full grace period; delete; then keep
+// the tombstone through a second grace period to detect any late completion.
+// The File commit uses assertTemporaryOwned(...FOR UPDATE), so a revoked writer
+// cannot publish a File after our state change. We never delete a referenced file.
+async function recheckAndSweepS3Claim(storage, claim, cutoff, client, stats) {
+  if (await hasDurableReference(claim, client)) {
+    if (claim.kind !== "SESSION") {
+      await client.temporaryObject.deleteMany({
+        where: { id: claim.id, token: claim.token, state: claim.state }
+      });
+    }
+    stats.protected++;
+    return;
+  }
+  if (claim.kind === "SESSION") {
+    // Session part cleanup is handled by the leased #59 worker with DB fences.
+    stats.protected++;
+    return;
+  }
+  const key = claim.objectKey.slice(claim.kind === "ASSEMBLY" ? 9 : 5);
+  if (!/^[A-Za-z0-9._-]+$/.test(key)) {
+    stats.errors++;
+    return;
+  }
+  if (claim.state === "ACTIVE") {
+    // Invalidates a suspended writer's heartbeat and blocks DB publication.
+    const marked = await client.temporaryObject.updateMany({
+      where: { id: claim.id, token: claim.token, state: "ACTIVE", leaseUntil: { lte: cutoff } },
+      data: { state: "REAPING", token: crypto.randomUUID(), leaseUntil: new Date() }
+    });
+    if (marked.count) stats.quarantined++;
+    return;
+  }
+
+  // Use a remote HEAD rather than bucket inventory. A recently finished
+  // multipart upload may be younger than the claim: never delete it yet.
+  const lastModified = await storage.objectLastModified(key);
+  if (lastModified && lastModified > cutoff) {
+    await client.temporaryObject.updateMany({
+      where: { id: claim.id, token: claim.token, state: claim.state },
+      data: { leaseUntil: new Date() }
+    });
+    stats.protected++;
+    return;
+  }
+
+  const newToken = crypto.randomUUID();
+  const marked = await client.temporaryObject.updateMany({
+    where: { id: claim.id, token: claim.token, state: claim.state, leaseUntil: { lte: cutoff } },
+    data: {
+      state: "VERIFYING",
+      token: newToken, leaseUntil: new Date()
+    }
+  });
+  if (marked.count !== 1) return;
+  try {
+    if (await hasDurableReference(claim, client)) {
+      await client.temporaryObject.deleteMany({ where: { id: claim.id, token: newToken } });
+      stats.protected++;
+      return;
+    }
+    if (claim.state === "REAPING") {
+      const latest = await storage.objectLastModified(key);
+      if (latest && latest > cutoff) {
+        await client.temporaryObject.updateMany({
+          where: { id: claim.id, token: newToken, state: "VERIFYING" },
+          data: { state: "REAPING", leaseUntil: new Date() }
+        });
+        stats.protected++;
+        return;
+      }
+      await storage.delete(key);
+      stats.verifying++;
+      // Keep the record while the remote provider settles and any extremely
+      // late completion could re-create the object.
+      return;
+    }
+
+    // Second grace elapsed after deletion. An absent object can now be
+    // released; late remote completions are re-quarantined and deleted again.
+    if (await storage.objectLastModified(key)) {
+      await client.temporaryObject.updateMany({
+        where: { id: claim.id, token: newToken, state: "VERIFYING" },
+        data: { state: "REAPING", leaseUntil: new Date() }
+      });
+      stats.protected++;
+    } else {
+      await client.temporaryObject.deleteMany({
+        where: { id: claim.id, token: newToken, state: "VERIFYING" }
+      });
+      stats.reaped++;
+    }
+  } catch (error) {
+    stats.errors++;
+    await client.temporaryObject.updateMany({
+      where: { id: claim.id, token: newToken, state: "VERIFYING" },
+      data: { state: "REAPING", leaseUntil: new Date() }
+    }).catch(() => {});
   }
 }
 
@@ -221,27 +324,42 @@ async function reconcileStorage(storage, client = prisma, settings = {}) {
   const config = { ...reconciliationSettings(), ...settings };
   const started = Date.now();
   const stats = {
-    supported: storage instanceof LocalStorageAdapter,
-    claimsExamined: 0, reaped: 0, protected: 0, errors: 0,
+    supported: storage instanceof LocalStorageAdapter || storage instanceof S3StorageAdapter,
+    claimsExamined: 0, reaped: 0, quarantined: 0, verifying: 0, protected: 0, errors: 0,
     unclaimedLegacyObjects: 0, missingCommittedObjects: 0,
     durationMs: 0, temporary: null
   };
   if (!stats.supported) {
-    stats.reason = "External object inventory needs provider-specific integration; no provider configured";
+    stats.reason = "Storage adapter has no safely supported reconciliation method";
     recentReport = stats;
     return stats;
   }
   const cutoff = new Date(Date.now() - config.graceMs);
   const claims = await client.temporaryObject.findMany({
-    where: { state: { in: ["ACTIVE", "REAPING"] }, leaseUntil: { lte: cutoff } },
+    where: {
+      state: { in: ["ACTIVE", "REAPING", "VERIFYING"] },
+      leaseUntil: { lte: cutoff },
+      ...(storage instanceof S3StorageAdapter ? { kind: { in: ["FILE", "ASSEMBLY"] } } : {})
+    },
     orderBy: [{ leaseUntil: "asc" }, { id: "asc" }],
     take: config.batchSize
   });
   stats.claimsExamined = claims.length;
   for (const claim of claims) {
-    await recheckAndSweepClaim(storage, claim, cutoff, client, stats);
+    try {
+      if (storage instanceof S3StorageAdapter) {
+        await recheckAndSweepS3Claim(storage, claim, cutoff, client, stats);
+      } else {
+        await recheckAndSweepClaim(storage, claim, cutoff, client, stats);
+      }
+    } catch {
+      // One transient provider failure must not block subsequent candidates.
+      stats.errors++;
+    }
   }
-  await scanUnclaimedLocal(storage, client, stats, cutoff, config.batchSize);
+  if (storage instanceof LocalStorageAdapter) {
+    await scanUnclaimedLocal(storage, client, stats, cutoff, config.batchSize);
+  }
   await probeCommittedFiles(storage, client, stats, Math.min(config.batchSize, 100));
   stats.temporary = await tempStats(client);
   stats.durationMs = Date.now() - started;

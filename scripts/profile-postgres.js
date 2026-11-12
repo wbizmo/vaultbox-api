@@ -122,6 +122,12 @@ async function insertTenantRows(userId, size, seed) {
 }
 
 async function run({ sizes = DEFAULT_SIZES, client = prisma } = {}) {
+  // This benchmark creates and deletes thousands of rows. A shell exporting
+  // DATABASE_URL must never accidentally point it at a live production DB.
+  if (process.env.NODE_ENV === "production" ||
+      process.env.VAULTBOX_QUERY_PROFILE_ALLOW_WRITES !== "1") {
+    throw new Error("Refusing to seed synthetic rows: set VAULTBOX_QUERY_PROFILE_ALLOW_WRITES=1 on a disposable non-production database");
+  }
   if (!Number.isSafeInteger(ITERATIONS) || ITERATIONS < 5 || ITERATIONS > 1000) {
     throw new Error("VAULTBOX_QUERY_PROFILE_ITERATIONS must be 5..1000");
   }

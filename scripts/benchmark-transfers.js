@@ -15,6 +15,12 @@ const { LocalStorageAdapter } = require("../src/lib/storage");
 const SIZES = [1, 4, 16, 32];
 const UPLOAD_BYTES = Number(process.env.BENCHMARK_FILE_BYTES || 256 * 1024);
 const CHUNK_BYTES = Number(process.env.BENCHMARK_CHUNK_BYTES || 64 * 1024);
+const RANGED_DOWNLOAD_BYTES = 4096;
+function rangedDownloadTransferredBytes(requests) {
+  if (!Number.isSafeInteger(requests) || requests < 0) throw new Error("Invalid range request count");
+  return requests * RANGED_DOWNLOAD_BYTES;
+}
+
 let executedQueries = 0;
 if (require.main === module) prisma.$on("query", () => { executedQueries += 1; });
 const MAX_RSS_MB = Number(process.env.BENCHMARK_MAX_RSS_MB || 1024);
@@ -179,10 +185,10 @@ async function profile(base, app, planId, concurrency, mode, userIds) {
   await stage(result, "rangedDownload",
     downloadTokens.map((token) => async () => {
       const body = await request(base, "GET", "/download/" + token, null, {
-        binary: true, headers: { range: "bytes=0-4095" }
+        binary: true, headers: { range: "bytes=0-" + (RANGED_DOWNLOAD_BYTES - 1) }
       });
-      if (body.length !== 4096) throw new Error("Wrong range body length");
-    }), concurrency * CHUNK_BYTES);
+      if (body.length !== RANGED_DOWNLOAD_BYTES) throw new Error("Wrong range body length");
+    }), rangedDownloadTransferredBytes(downloadTokens.length));
   await stage(result, "fileDelete",
     fileIds.map((fileId, i) => async () => request(base, "DELETE", "/files/" + fileId, auth(i))));
   return result;
@@ -243,4 +249,4 @@ if (require.main === module) main().catch((error) => {
   process.exitCode = 1;
 });
 
-module.exports = { percentile };
+module.exports = { percentile, rangedDownloadTransferredBytes };

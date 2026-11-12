@@ -183,16 +183,38 @@ test("large S3 multipart transfer retains exact bytes, checksum and range reads"
   }
 });
 
-test("unsafe S3 providers that ignore conditional create-only headers fail closed at readiness", { skip: !enabled }, async () => {
-  const a = makeAdapter("conditional-probe-" + crypto.randomUUID());
+test("unsafe S3 providers ignoring conditional create-only writes fail closed without network provider", async () => {
+  const commands = [];
+  const ignoring = { send: async (command) => {
+    commands.push(command.constructor.name);
+    return {};
+  }, destroy() {} };
   const strict = new S3StorageAdapter({
-    client: a.client, bucket, region: "us-east-1",
+    client: ignoring, bucket, region: "us-east-1",
     prefix: "conditional-probe-" + crypto.randomUUID(), sse: null,
     verifyConditionalWrites: true
   });
-  try {
-    await assert.rejects(strict.ready(), /ignored If-None-Match|refusing unsafe/);
-  } finally {
-    a.client.destroy();
-  }
+  await assert.rejects(strict.ready(), /ignored If-None-Match|refusing unsafe/);
+  assert.equal(commands.filter(x => x === "PutObjectCommand").length, 2);
+  assert.ok(commands.includes("DeleteObjectCommand"));
+});
+
+test("provider that enforces conditional create-only writes passes readiness probe", async () => {
+  let puts = 0;
+  const enforcing = { send: async (command) => {
+    if (command.constructor.name === "PutObjectCommand" && ++puts === 2) {
+      const error = new Error("PreconditionFailed");
+      error.name = "PreconditionFailed";
+      error.$metadata = { httpStatusCode: 412 };
+      throw error;
+    }
+    return {};
+  }, destroy() {} };
+  const strict = new S3StorageAdapter({
+    client: enforcing, bucket, region: "us-east-1",
+    prefix: "safe-conditional-probe-" + crypto.randomUUID(), sse: null,
+    verifyConditionalWrites: true
+  });
+  await strict.ready();
+  assert.equal(puts, 2);
 });

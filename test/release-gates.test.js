@@ -40,6 +40,9 @@ test("manual release gate requires exact verified main SHA, package/notes/versio
   }
   fs.writeFileSync(path.join(ok.notesDirectory, "RELEASE_NOTES_v2.5.0.md"), "# Wrong title\n");
   assert.throws(() => validateReleaseGate(ok), /heading/);
+  fs.writeFileSync(path.join(ok.notesDirectory, "RELEASE_NOTES_v2.5.0.md"),
+    "# VaultBox v2.5.0 — Draft (UNRELEASED)\n");
+  assert.throws(() => validateReleaseGate(ok), /UNRELEASED|draft release/i);
 });
 
 test("production startup and migrations use locally installed pinned Prisma without remote npx", () => {

@@ -120,6 +120,8 @@ model File {
   folder Folder?         @relation(fields: [folderId], references: [id])
   tokens DownloadToken[]
 
+  // Bounded orphan reconciliation probes by the immutable stored object key.
+  @@index([storedName])
   @@index([userId, status, createdAt, id])
   @@index([userId, status, updatedAt, id])
   @@index([userId, status, size, id])

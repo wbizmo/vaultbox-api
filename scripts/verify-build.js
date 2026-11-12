@@ -1,4 +1,4 @@
-"use strict";
+// @ts-check\n"use strict";
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");

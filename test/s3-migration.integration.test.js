@@ -91,4 +91,36 @@ test("local-to-S3 cutover is dry-run by default, verifies checksums, refuses act
   assert.deepEqual(await fs.readFile(local.resolve(storedName)), body, "original must survive");
   const unchanged = await prisma.file.findUnique({ where: { id: file.id } });
   assert.equal(unchanged.size, BigInt(body.length));
+
+  // A pre-UUID installation may have nested storedName values. The S3
+  // adapter must preserve the original DB name through a deterministic
+  // legacy namespace, and dry-run must list the affected File IDs.
+  const legacyStoredName = "archive/" + tag + "/customer scan 2021.pdf";
+  const legacySource = { storedName: legacyStoredName };
+  const legacyPath = local.resolveFile(legacySource);
+  await fs.mkdir(path.dirname(legacyPath), { recursive: true });
+  const legacyBytes = Buffer.from("legacy scanned document survives S3 migration and local cutover");
+  await fs.writeFile(legacyPath, legacyBytes);
+  const legacyFile = await prisma.file.create({
+    data: { userId: user.id, storedName: legacyStoredName, path: legacyStoredName,
+      originalName: "customer scan 2021.pdf", mimeType: "application/pdf",
+      size: BigInt(legacyBytes.length),
+      checksum: crypto.createHash("sha256").update(legacyBytes).digest("hex") }
+  });
+  const dryLegacy = await migrate(options);
+  assert.equal(dryLegacy.legacyMapped, 1);
+  assert.deepEqual(dryLegacy.legacyFileIds, [legacyFile.id]);
+  assert.equal(dryLegacy.wouldCopy, 1);
+  const applyLegacy = await migrate({ ...options, apply: true });
+  assert.equal(applyLegacy.copied, 1);
+  assert.equal(await remote.existsFile(legacyFile), true);
+  const verifyLegacy = await migrate({ ...options, verifyOnly: true });
+  assert.equal(verifyLegacy.legacyMapped, 1);
+  assert.equal(verifyLegacy.verified, 2);
+  const chunks = [];
+  for await (const chunk of await remote.openReadStreamForFile(legacyFile)) chunks.push(chunk);
+  assert.deepEqual(Buffer.concat(chunks), legacyBytes);
+  await remote.deleteFile(legacyFile);
+  assert.equal(await remote.existsFile(legacyFile), false);
+  assert.deepEqual(await fs.readFile(legacyPath), legacyBytes);
 });

@@ -21,6 +21,9 @@ function validateReleaseGate({ version, sha, mainSha, packageVersion, runs, note
   if (!firstLine.startsWith("# ") || !firstLine.includes("v" + version)) {
     throw new Error("Release heading must contain the exact tag version");
   }
+  if (/\b(?:UNRELEASED|DRAFT)\b/i.test(firstLine)) {
+    throw new Error("Cannot publish a draft release heading marked UNRELEASED");
+  }
   if (!Array.isArray(runs) || !runs.some((run) =>
     run.headSha === sha && run.headBranch === "main" &&
     run.event === "push" && run.status === "completed" && run.conclusion === "success"

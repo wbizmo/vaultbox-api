@@ -72,6 +72,16 @@ test("optional total count preserves old metadata by default and never reveals o
   assert.equal(legacy.pagination.pages, 2);
   assert.equal(legacy.files.length, 2);
 
+  // CodeQL regression: untrusted sort keys never become Prisma object keys.
+  const invalidSort = await app.inject({
+    method: "GET", url: "/files?sort=__proto__&order=asc", headers: auth
+  });
+  assert.equal(invalidSort.statusCode, 400);
+  const invalidOrder = await app.inject({
+    method: "GET", url: "/files?sort=constructor&includeTotal=false", headers: auth
+  });
+  assert.equal(invalidOrder.statusCode, 400);
+
   const first = await get("limit=2&sort=originalName&order=asc&includeTotal=false");
   assert.equal(first.pagination.total, null);
   assert.equal(first.pagination.pages, null);

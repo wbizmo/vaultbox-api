@@ -143,4 +143,4 @@ Initial production release with authentication, plans and quotas, file/folder op
 
 ## [2.5.0] — Unreleased (consolidated v2.3–v2.5 draft PR #88)
 
-Includes shared-storage tooling (provider unverified), durable temp-byte admission/orphan reconciliation, cleanup/retention, real HTTP and PostgreSQL benchmarks, 10k-part pagination, independent-process security/fault testing, manually gated releases, folder-aware uploads and accurate reserved quota reporting. See \`docs/RELEASE_NOTES_v2.5.0.md\`. Do not treat this section as a shipped release.
+Includes shared-storage tooling (provider unverified), durable temp-byte admission/orphan reconciliation, cleanup/retention, real HTTP and PostgreSQL benchmarks, 10k-part pagination, independent-process security/fault testing, manually gated releases, folder-aware uploads and accurate reserved quota reporting. See `docs/RELEASE_NOTES_v2.5.0.md`. Do not treat this section as a shipped release.

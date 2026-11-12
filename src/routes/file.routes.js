@@ -24,7 +24,8 @@ const { assertOwnedFolderLocked } = require("../lib/folder-ownership");
 const { retryOnConflict } = require("../lib/db-retry");
 const { reserveTemporary, startTempHeartbeat, assertTemporaryOwned,
   releaseTemporary, ensurePhysicalHeadroom } = require("../lib/temporary-storage");
-const { decodeCursor, cursorWhere, cursorOrderBy, finishCursorPage } = require("../lib/pagination");
+const { decodeCursor, finishCursorPage } = require("../lib/pagination");
+const { filePageOrderBy, fileCursorOrderBy, fileCursorWhere } = require("../lib/file-order");
 
 const fileCursorTypes = {
   createdAt: "date",
@@ -359,8 +360,8 @@ async function fileRoutes(app) {
       }
 
       const rows = await prisma.file.findMany({
-        where: { AND: [baseWhere, cursorWhere(decoded, options)] },
-        orderBy: cursorOrderBy(sort, order),
+        where: { AND: [baseWhere, fileCursorWhere(decoded, sort, order)] },
+        orderBy: fileCursorOrderBy(sort, order),
         take: limit + 1
       });
       const result = finishCursorPage(rows, limit, options);
@@ -376,7 +377,7 @@ async function fileRoutes(app) {
       // preserving the legacy count behavior unless clients explicitly opt out.
       const rows = await prisma.file.findMany({
         where: baseWhere,
-        orderBy: [{ [sort]: order }, { id: order }],
+        orderBy: fileCursorOrderBy(sort, order),
         skip: (page - 1) * limit,
         take: limit + 1
       });
@@ -394,7 +395,7 @@ async function fileRoutes(app) {
       prisma.file.count({ where: baseWhere }),
       prisma.file.findMany({
         where: baseWhere,
-        orderBy: { [sort]: order },
+        orderBy: filePageOrderBy(sort, order),
         skip: (page - 1) * limit,
         take: limit
       })

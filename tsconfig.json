@@ -16,6 +16,8 @@
   "include": [
     "types/**/*.ts",
     "scripts/security-static-check.js",
-    "scripts/verify-release-gate.js"
+    "scripts/verify-release-gate.js",
+    "scripts/redact-test-artifacts.js",
+    "scripts/verify-build.js"
   ]
 }

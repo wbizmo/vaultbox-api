@@ -62,7 +62,7 @@ async function claimFileDeletions({ limit = DEFAULTS.batchSize, leaseMs = DEFAUL
 async function finishOne(storage, row, options, client) {
   try {
     // true = removed now, false = already gone: both are a finished cleanup.
-    await storage.deleteFile({ storedName: row.storedName });
+    await storage.deleteFile({ id: row.fileId, storedName: row.storedName });
   } catch (error) {
     const dead = row.attempts >= options.maxAttempts;
     const delay = backoffMs(row.attempts, options);

@@ -51,15 +51,20 @@ async function claimTemporary({ userId, objectKey, kind, bytes, leaseMs = 120000
   if (!Number.isSafeInteger(leaseMs) || leaseMs < 1000) throw new Error("Invalid temporary lease");
   await tx.$queryRawUnsafe("SELECT pg_advisory_xact_lock(826514203)::text");
   const [totals] = await tx.$queryRawUnsafe(
-    'SELECT COALESCE(SUM("bytes"), 0)::bigint AS "bytes", COUNT(*)::integer AS "claims", ' +
+    'SELECT COALESCE(SUM("bytes"), 0)::bigint AS "bytes", ' +
+    'COUNT(*) FILTER (WHERE NOT ("kind" = \'ASSEMBLY\' AND "bytes" = 0))::integer AS "claims", ' +
     'COALESCE(SUM("bytes") FILTER (WHERE "userId" = $1), 0)::bigint AS "userBytes", ' +
-    'COUNT(*) FILTER (WHERE "userId" = $1)::integer AS "userClaims" FROM "TemporaryObject"',
+    'COUNT(*) FILTER (WHERE "userId" = $1 AND NOT ("kind" = \'ASSEMBLY\' AND "bytes" = 0))::integer ' +
+    'AS "userClaims" FROM "TemporaryObject"',
     userId
   );
+  // The parent SESSION claim already accounts for its bytes and admission.
+  // A zero-byte ASSEMBLY marker only fences its output during completion.
+  const admissionSlots = kind === "ASSEMBLY" && bytes === 0n ? 0 : 1;
   if (totals.bytes + bytes > limits.globalBytes ||
     totals.userBytes + bytes > limits.userBytes ||
-    totals.claims + 1 > limits.globalClaims ||
-    totals.userClaims + 1 > limits.userClaims) throw tempBudgetError();
+    totals.claims + admissionSlots > limits.globalClaims ||
+    totals.userClaims + admissionSlots > limits.userClaims) throw tempBudgetError();
   const token = crypto.randomUUID();
   return tx.temporaryObject.create({
     data: {

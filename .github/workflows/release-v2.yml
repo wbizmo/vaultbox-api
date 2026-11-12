@@ -77,6 +77,9 @@ jobs:
             echo "::error::Release already exists; refusing to republish"
             exit 1
           fi
+          # Checkout deliberately uses persist-credentials=false. This
+          # unauthenticated ls-remote requires the repository to stay public;
+          # private repositories need an approved short-lived read token.
           refs="$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")"
           tag_sha="$(printf '%s\n' "$refs" | awk -v t="refs/tags/$tag^{}" '$2==t{print $1}')"
           if [ -z "$tag_sha" ]; then

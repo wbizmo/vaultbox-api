@@ -62,7 +62,8 @@ async function assertNoPendingWrites(client) {
 async function migrate({ apply = false, verifyOnly = false, limit = 500, after = "", userId = null, local, remote, client = prisma } = {}) {
   await assertNoPendingWrites(client);
   const summary = { mode: verifyOnly ? "verify-only" : apply ? "apply" : "dry-run",
-    scanned: 0, copied: 0, verified: 0, wouldCopy: 0, lastId: after };
+    scanned: 0, copied: 0, verified: 0, wouldCopy: 0, lastId: after,
+    legacyMapped: 0, legacyFileIds: [] };
   let cursor = after;
   while (summary.scanned < limit) {
     const files = await client.file.findMany({
@@ -74,6 +75,14 @@ async function migrate({ apply = false, verifyOnly = false, limit = 500, after =
       cursor = file.id;
       summary.scanned++;
       summary.lastId = cursor;
+      // A deterministic SHA-256 legacy object namespace is shared by
+      // migration, S3 reads, HEAD and deferred deletion. Keep the original
+      // storedName in PostgreSQL and report affected IDs before any writes.
+      if (!/^[A-Za-z0-9._-]+$/.test(file.storedName)) {
+        remote.objectKeyForFile(file);
+        summary.legacyMapped++;
+        if (summary.legacyFileIds.length < 100) summary.legacyFileIds.push(file.id);
+      }
       const source = await digest(await local.openReadStreamForFile(file));
       if (source.size !== file.size || (file.checksum && source.checksum !== file.checksum)) {
         throw new Error("Source bytes or checksum mismatch for file " + file.id + " (" + file.storedName + ")");
@@ -90,7 +99,7 @@ async function migrate({ apply = false, verifyOnly = false, limit = 500, after =
         summary.wouldCopy++;
         continue;
       }
-      await pipeline(await local.openReadStreamForFile(file), remote.createWriteStream(file.storedName));
+      await pipeline(await local.openReadStreamForFile(file), remote.createWriteStreamForFile(file));
       await verifyObject(remote, file, source);
       summary.copied++;
     }
