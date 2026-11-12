@@ -11,6 +11,10 @@
 
 All existing v2.2.0 security, account, rate-limit, audit and quota contracts remain mandatory.
 
+## Render Free compatibility
+
+The existing free Render service can deploy the complete v2.5.0 code using `npm install --omit=dev`, Render-only `postinstall` Prisma generation/verification and opt-in `VAULTBOX_RENDER_FREE_MODE=1` migration before `npm start`. The version-specific API and security features are unchanged. The Free service has one instance, no pre-deploy command and no persistent disk; it loses local file bytes on restarts, redeploys and idle spin-down. Database metadata may remain even if bytes disappear. This deployment is an ephemeral-file **demo**, not verified durable user storage. See [deployment guide](./DEPLOYMENT.md).
+
 ## Compatibility
 
 - `GET /files`, `GET /folders`, admin pagination preserve original count responses unless the caller requests `includeTotal=false`.

@@ -5,6 +5,8 @@
   "main": "src/server.js",
   "scripts": {
     "dev": "node --watch src/server.js",
+    "postinstall": "node scripts/render-install.js",
+    "prestart": "node scripts/render-startup.js",
     "start": "node src/server.js",
     "build": "npm run deploy:generate && npm run typecheck && node scripts/verify-build.js",
     "lint": "eslint src scripts test prisma",

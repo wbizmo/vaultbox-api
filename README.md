@@ -316,9 +316,15 @@ On [GitHub CI run #43130804149](https://github.com/wbizmo/vaultbox-api/actions/r
 
 These are **synthetic CI fixture scores**, not live Render throughput or evidence of production durability. All 8 HTTP transfer profiles reported 0 failures. For the full 1/4/16/32-client tables, runner variables, raw artifact, exact reproduction instructions, and interpretation caveats, see **[Benchmark report and reproduction guide](./docs/BENCHMARKS_v2.5.0.md)**. Historical performance claims must identify the commit and environment; rerun on the final main SHA to publish a final release baseline.
 
+## Render Free deployment and limitations
+
+**The v2.5.0 API can run on the existing Render Free service without S3 or a paid disk.** Its `npm install --omit=dev` build executes a Render-only `postinstall` hook to generate/verify Prisma using the pinned production dependency. Setting `VAULTBOX_RENDER_FREE_MODE=1` enables an explicit **single-instance-only startup migration** fallback before `node src/server.js`, because Render Free does not support pre-deploy jobs. Every other platform keeps the separated migration deployment contract.
+
+**Critical limitation:** Render Free's local files are **ephemeral**: writes vanish on redeploy, restart and after idle spin-down. Neon metadata can remain after bytes disappear. This deployment is a feature demonstration/evaluation system, **not durable file storage**. Transfer capabilities, security, upload retry, cleanup, S3-compatible adapter and all other code paths remain present; provider-dependent durability guarantees are **UNVERIFIED** by decision. No paid storage or S3 has been configured. See the [Render Free deployment contract](./docs/DEPLOYMENT.md#render-free-deployment-contract-supported-v250-compatibility-mode).
+
 ## Production deployment
 
-**v2.5.0 changes the startup contract.** The old v2.2.0 Render service currently generates Prisma and applies migrations inside `npm start`. The new release deliberately separates these operations:
+**v2.5.0 normally separates build, migration and startup.** On Render Free, the explicitly enabled compatibility hooks above supply generation and migration around the unchanged `npm start` entrypoint:
 
 ```text
 Build: npm ci && npm run build

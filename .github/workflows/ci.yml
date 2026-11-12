@@ -88,6 +88,9 @@ jobs:
           cat dependency-audit.json
           exit $status
 
+      - name: Render Free install/startup compatibility regressions
+        run: node --test test/render-free-compatibility.test.js
+
       - name: Validate Prisma schema
         run: npx prisma validate
 
