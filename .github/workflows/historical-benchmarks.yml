@@ -65,27 +65,38 @@ jobs:
           path: harness
           persist-credentials: false
 
-      - name: Install legacy v1 dependencies with modern npm
-        if: matrix.release == 'v1.0.0'
-        uses: actions/setup-node@v6
-        with:
-          node-version: 24.22.2
-
-      - name: Pin other historical runtime before installation
-        if: matrix.release != 'v1.0.0'
+      - name: Pin the historical Node runtime
         uses: actions/setup-node@v6
         with:
           node-version-file: release/.node-version
+
+      - name: Replace v1 archived private registry mirror with integrity-checked public URLs
+        if: matrix.release == 'v1.0.0'
+        working-directory: release
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          lock = Path("package-lock.json")
+          original = lock.read_text()
+          prefix = "http://package-firewall.replit.local/npm/"
+          if prefix not in original:
+              raise SystemExit("Expected historical Replit mirror not present")
+          data_before = json.loads(original)
+          converted = original.replace(prefix, "https://registry.npmjs.org/")
+          data_after = json.loads(converted)
+          for key, desc in data_before.get("packages", {}).items():
+              updated = data_after.get("packages", {}).get(key, {})
+              if desc.get("version") != updated.get("version") or desc.get("integrity") != updated.get("integrity"):
+                  raise SystemExit("Dependency identity/integrity must remain unchanged: " + key)
+          lock.write_text(converted)
+          print("Rebased archived registry URLs only; versions and integrity preserved")
+          PY
 
       - name: Install only that release's locked dependencies
         working-directory: release
         run: npm ci --no-audit --no-fund
-
-      - name: Restore v1's exact Node 20 runtime for execution
-        if: matrix.release == 'v1.0.0'
-        uses: actions/setup-node@v6
-        with:
-          node-version-file: release/.node-version
 
       - name: Generate the version-matched Prisma client and migrate disposable database
         working-directory: release
