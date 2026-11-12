@@ -6,7 +6,7 @@ All notable changes to VaultBox API are documented here.
 
 Further changes after the v2.5.0 candidate should be recorded here.
 
-## [2.5.0] - release candidate (2026-11-12)
+## [2.5.0] - 2026-11-12
 
 This consolidates the **v2.3** reliability, **v2.4** performance/security, and **v2.5** folder/quota roadmaps in a single deliverable; v2.3.0 and v2.4.0 were not published as separate GitHub releases. See [v2.5.0 cumulative notes](./docs/RELEASE_NOTES_v2.5.0.md), [v2.3 grouping](./docs/RELEASE_NOTES_v2.3.0.md), [v2.4 grouping](./docs/RELEASE_NOTES_v2.4.0.md) and [benchmark evidence](./docs/BENCHMARKS_v2.5.0.md).
 

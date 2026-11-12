@@ -1,6 +1,6 @@
 # VaultBox v2.5.0
 
-**Status:** v2.5.0 release candidate. Release publication and production activation must be verified independently; a versioned source tree does not establish that production runs this version. v2.3.0 and v2.4.0 were engineering groupings and were not separately tagged.
+**Version:** v2.5.0. Production deployment and source commit must be verified independently via [live health](https://vaultbox-api-ucff.onrender.com/health) and the Render dashboard; a published tag alone does not establish durable file storage. v2.3.0 and v2.4.0 were implementation groupings and were not separately tagged.
 
 ## Cumulative changes since v2.2.0
 
@@ -35,7 +35,7 @@ The review corrective batch addresses temporary ASSEMBLY concurrency-slot deadlo
 
 The exact PR-head CI benchmark results (Node 24.22.2, PostgreSQL 16.15, Redis 7, local storage) include **26,711.43 in-process health requests/s** with **0 errors**, **37.704 MiB/s one-shot uploads at concurrency 32**, and **8,000-file count-free pagination p50 0.225 ms**, compared with 1.182 ms when obtaining the exact count. See [complete scores, p95/p99, raw artifact and replication commands](./BENCHMARKS_v2.5.0.md). These are **not** public production benchmarks.
 
-## Release gates (must be independently evidenced)
+## Release verification evidence and operator acceptance
 
 - Verify complete local Node 24.22.2, PostgreSQL 16, Redis 7, lint, audit, integration, fault, performance and rollback/forward compatibility evidence on the exact final commit.
 - Run CodeQL v4 security-extended analysis on the exact reviewed commit; this is configured in the existing single CI verify runner and skipped while the PR is draft (CodeQL cannot be accurately claimed as locally executed). Complete CodeRabbit/human review and reconcile every linked issue's acceptance criteria except the explicitly documented provider exception.
@@ -43,11 +43,11 @@ The exact PR-head CI benchmark results (Node 24.22.2, PostgreSQL 16.15, Redis 7,
 - Configure required human reviewers for the GitHub `vaultbox-release` environment, disable unintended automatic deployment for this migration, take backups, rehearse rollback and live smoke tests.
 - After explicit approval: merge, run protected-main CI at the exact SHA, intentionally dispatch the release gate, verify production deployment and record evidence in epic #66 and tracker #68. No automated publishing from a draft PR.
 
-## Review-ready CI gate (not a production release)
+## Full protected-main CI verification
 
 The consolidated PR workflow on its exact head runs Node 24.22.2, PostgreSQL 16, Redis 7, locked npm ci, moderate-severity-or-higher npm dependency audit, Prisma schema validation and migrations, strict TypeScript checking of generated data-model contracts plus checked security JavaScript, a real Prisma/runtime module build smoke, ESLint, syntax checking, static secret scanning, the full integration suite with coverage, explicit independent-process/BOLA/failure corpus, 10k-session cleanup stress, three benchmark suites and CodeQL security-extended. One runner handles verification and CodeQL; redundant SHA runs are cancelled. The final green CI run, review threads and any operational exceptions must be inspected before merge approval.
 
-Main currently runs the prior version's CI until this review PR is merged. Do not push a standalone version/CI update to main merely to obtain a green check: Render currently auto-deploys main, and pushing would risk an unapproved production deployment. The full CI workflow is committed in this PR and will replace the old main workflow as part of the reviewed merge. CodeRabbit and human reviewers should review the full consolidated diff, not just the latest commit.
+The complete CI workflow is part of this release. A one-time GitHub Actions workflow can publish **only v2.5.0**, after the exact merged-main SHA passes CI and the public Render health endpoints report v2.5.0 with PostgreSQL/Redis operational. The manual exact-SHA release gate remains available for future releases. The user explicitly selected Render Free ephemeral-storage deployment, not a durable S3 or persistent-disk provider.
 
 ## Historical version notes
 
