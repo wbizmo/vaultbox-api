@@ -18,7 +18,8 @@
     "benchmark:transfers": "node scripts/benchmark-transfers.js",
     "benchmark:queries": "node scripts/profile-postgres.js",
     "security:scan": "node scripts/security-static-check.js",
-    "typecheck": "tsc --project tsconfig.json --noEmit"
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "benchmark:capabilities": "node scripts/benchmark-capabilities.js"
   },
   "keywords": [
     "cloud-storage",

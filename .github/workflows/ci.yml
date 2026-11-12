@@ -158,6 +158,13 @@ jobs:
           set -euo pipefail
           npm run benchmark:queries | tee query-benchmark.json
 
+      - name: Cross-release capability API benchmarks (current v2.5 implementation)
+        env:
+          VAULTBOX_BENCHMARK_ALLOW_WRITES: "1"
+        run: |
+          set -euo pipefail
+          npm run benchmark:capabilities | tee capability-benchmark.json
+
       # CodeQL security-extended runs on this same runner, not a second job.
       - name: Analyze CodeQL findings
         uses: github/codeql-action/analyze@v4
@@ -171,6 +178,7 @@ jobs:
             benchmark.json
             transfer-benchmark.json
             query-benchmark.json
+            capability-benchmark.json
             dependency-audit.json
             test-output.redacted.log
             build-verification.log
