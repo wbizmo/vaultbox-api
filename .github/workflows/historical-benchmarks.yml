@@ -13,6 +13,10 @@ permissions:
 
 jobs:
   history:
+    # The initial matrix already produced five verified tagged artifacts.
+    # Subsequent branch pushes retry only v1's legacy npm-install failure.
+    # Manual dispatches remain available to rerun all six profiles.
+    if: github.event_name == 'workflow_dispatch' || matrix.release == 'v1.0.0'
     name: Benchmark ${{ matrix.release }}
     strategy:
       fail-fast: false
@@ -63,7 +67,14 @@ jobs:
           path: harness
           persist-credentials: false
 
-      - name: Pin historical release's own Node runtime
+      - name: Install legacy v1 dependencies with modern npm
+        if: matrix.release == 'v1.0.0'
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24.22.2
+
+      - name: Pin other historical runtime before installation
+        if: matrix.release != 'v1.0.0'
         uses: actions/setup-node@v6
         with:
           node-version-file: release/.node-version
@@ -71,6 +82,12 @@ jobs:
       - name: Install only that release's locked dependencies
         working-directory: release
         run: npm ci --no-audit --no-fund
+
+      - name: Restore v1's exact Node 20 runtime for execution
+        if: matrix.release == 'v1.0.0'
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: release/.node-version
 
       - name: Generate the version-matched Prisma client and migrate disposable database
         working-directory: release

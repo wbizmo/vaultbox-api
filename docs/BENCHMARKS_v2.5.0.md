@@ -97,6 +97,23 @@ This avoids the invalid shortcut of using current code and calling it a v1/v2 ba
 
 Workflow: [Historical Benchmarks](../.github/workflows/historical-benchmarks.yml). The automatic one-time candidate branch run triggers when the workflow file is added; future reruns can use the manual workflow dispatch after merge. Once CI finishes, insert the actual verified per-version numbers and run links here. **Do not fabricate scores while a job is pending**.
 
+### Verified tagged-code throughput from historical CI
+
+Real source/artifact: [historical CI run #43137602142](https://github.com/wbizmo/vaultbox-api/actions/runs/43137602142), generated 2026-11-12, isolated Postgres16/Redis7. All rows below are the **32-concurrency profile**, **100 requests per route**, zero errors for the five completed versions. Other 1/4/16 profiles are in each version's uploaded JSON artifact. The `candidate` runner used commit `389bb0e`, containing the v2.5.0 API code (final release SHA pending).
+
+| Real source checkout | Node | `GET /health` req/s | Health p95 | `GET /plans` req/s | Plans p95 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| v1.0.0 | v20.19.5 | **Not measured** | — | **Not measured** | — |
+| v2.0.0 | v24.19.0 | 12,345.769 | 2.996 ms | 3,377.955 | 12.582 ms |
+| v2.1.0 | v24.19.0 | 14,642.427 | 2.532 ms | 3,349.248 | 15.136 ms |
+| v2.1.1 | v24.22.2 | 15,599.249 | 2.205 ms | 5,209.838 | 7.862 ms |
+| v2.2.0 | v24.22.2 | 12,226.121 | 2.796 ms | 3,734.203 | 11.071 ms |
+| v2.5.0 candidate | v24.22.2 | 15,930.139 | 2.206 ms | 4,225.974 | 10.429 ms |
+
+`GET /` was also benchmarked with the same concurrency and sample size: v2.0.0 18,976.531 req/s; v2.1.0 20,169.472; v2.1.1 15,154.505; v2.2.0 15,695.820; v2.5.0 candidate 14,992.182.
+
+**Do not interpret differences as guaranteed acceleration or regression.** The samples are short (100 requests/profile), each tag uses its original Node patch, GitHub runners have variable CPU contention, and these are in-process `Fastify.inject` calls with a disposable DB, not the public Render network. v1.0.0 initially failed **before testing** because its Node 20/npm 10 installation produced `npm error Exit handler never called!`; no v1 measurement was fabricated. The separate legacy-install rerun is tracked in the historical workflow.
+
 ## Not measured / not accepted
 
 No production Render/Neon/Upstash latency or uptime benchmark, no real production S3 provider, no persistent-disk recovery proof, no long-running SLA baseline, and no cross-host durability test. Those require separately authorized production observability, a safe staging clone and storage acceptance. The S3 provider acceptance remains **UNVERIFIED by owner direction**, not passed.
