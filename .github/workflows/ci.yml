@@ -128,7 +128,10 @@ jobs:
       - name: Explicit independent-process and malformed multipart regression gate
         run: |
           node --test test/distributed-fault-gates.integration.test.js
-          node --test test/temporary-storage.integration.test.js test/multipart-fuzz.integration.test.js
+          # Both files use process-external PostgreSQL temporary-claim counters.
+          # The repository's normal npm test gate runs one test file at a time;
+          # match that isolation here to avoid cross-file budget interference.
+          node --test --test-concurrency=1 test/temporary-storage.integration.test.js test/multipart-fuzz.integration.test.js
 
       - name: Ten-thousand-session cleanup backlog and two-worker gate
         env:
