@@ -24,9 +24,15 @@ const {
   recoverStaleCompletion,
   isStaleCompletion,
   expireIfNeeded,
-  cleanupUploadSessions
+  cleanupUploadSessions,
+  getUploadCleanupStats
 } = require("../lib/upload-session");
 const { retryOnConflict } = require("../lib/db-retry");
+const { pruneMetadata } = require("../lib/metadata-retention");
+const { assertOwnedFolderLocked } = require("../lib/folder-ownership");
+const { claimTemporary, reserveTemporary, startTempHeartbeat,
+  releaseTemporary, assertTemporaryOwned, ensurePhysicalHeadroom } = require("../lib/temporary-storage");
+const { reconcileStorage } = require("../lib/storage-reconciliation");
 const { throttlePreHandler } = require("../lib/throttle");
 
 const createThrottle = throttlePreHandler(
@@ -63,7 +69,7 @@ function serializePart(part) {
   };
 }
 
-function serializeSession(session, parts = session.parts || []) {
+function serializeSessionBase(session) {
   return {
     id: session.id,
     status: session.status,
@@ -71,13 +77,20 @@ function serializeSession(session, parts = session.parts || []) {
     mimeType: session.mimeType,
     expectedSize: session.expectedSize.toString(),
     expectedChecksum: session.expectedChecksum,
+    folderId: session.folderId ?? null,
     chunkSize: session.chunkSize,
     partCount: session.partCount,
-    uploadedParts: parts.map(serializePart),
-    missingParts: missingPartNumbers(session.partCount, parts),
     expiresAt: session.expiresAt,
     fileId: session.fileId,
     completedAt: session.completedAt
+  };
+}
+
+function serializeSession(session, parts = session.parts || []) {
+  return {
+    ...serializeSessionBase(session),
+    uploadedParts: parts.map(serializePart),
+    missingParts: missingPartNumbers(session.partCount, parts)
   };
 }
 
@@ -112,17 +125,39 @@ async function uploadRoutes(app) {
   const storage = app.vaultboxStorage;
   const config = app.vaultboxConfig;
 
-  app.addHook("onReady", async () => {
-    await cleanupUploadSessions(storage).catch((error) => {
-      app.log.warn({ err: error }, "Initial resumable-upload cleanup failed");
-    });
-  });
-
-  const cleanupTimer = setInterval(() => {
-    cleanupUploadSessions(storage).catch((error) => {
+  async function sweepUploadAndMetadata() {
+    try {
+      await cleanupUploadSessions(storage);
+      const stats = getUploadCleanupStats();
+      if (stats?.failures > 0) {
+        app.log.warn({ cleanup: stats }, "Upload cleanup backlog has failures");
+      } else if (stats?.claimed > 0 || stats?.terminal > 0 ||
+        stats?.pendingBacklog > 0 || stats?.terminalBacklog > 0) {
+        app.log.info({ cleanup: stats }, "Upload cleanup sweep progress");
+      }
+    } catch (error) {
       app.log.warn({ err: error }, "Resumable-upload cleanup failed");
-    });
-  }, 5 * 60 * 1000);
+    }
+    try {
+      const counts = await pruneMetadata();
+      if (counts.total > 0) app.log.info({ counts }, "Transfer metadata pruned");
+    } catch (error) {
+      app.log.warn({ err: error }, "Transfer metadata pruning failed");
+    }
+    try {
+      const report = await reconcileStorage(storage);
+      if (report.errors || report.missingCommittedObjects || report.unclaimedLegacyObjects) {
+        app.log.warn({ report }, "Storage reconciliation discrepancies require review");
+      } else if (report.reaped) {
+        app.log.info({ report }, "Stale temporary storage reconciled");
+      }
+    } catch (error) {
+      app.log.warn({ err: error }, "Storage reconciliation failed");
+    }
+  }
+
+  app.addHook("onReady", sweepUploadAndMetadata);
+  const cleanupTimer = setInterval(sweepUploadAndMetadata, 5 * 60 * 1000);
   cleanupTimer.unref();
   app.addHook("onClose", async () => clearInterval(cleanupTimer));
 
@@ -140,7 +175,8 @@ async function uploadRoutes(app) {
           originalName: { type: "string", minLength: 1, maxLength: 255 },
           mimeType: { type: "string", minLength: 1, maxLength: 255 },
           expectedSize: { type: "integer", minimum: 1, maximum: config.maxUploadBytes },
-          checksum: { type: "string", minLength: 64, maxLength: 64 }
+          checksum: { type: "string", minLength: 64, maxLength: 64 },
+          folderId: { type: "string", minLength: 1, maxLength: 255, description: "Optional owned target folder" }
         }
       }
     }
@@ -166,12 +202,27 @@ async function uploadRoutes(app) {
     if (!user?.planId) return reply.code(403).send({ message: "No active storage plan found" });
 
     const sessionId = crypto.randomUUID();
+    try {
+      await ensurePhysicalHeadroom(storage, expectedSize * 2n);
+    } catch (error) {
+      if (error.code === "TEMP_STORAGE_BUDGET_EXCEEDED") {
+        return reply.code(507).send({ message: "Not enough physical space for upload assembly" });
+      }
+      throw error;
+    }
     await storage.prepareUploadSession(sessionId);
 
     let session;
     try {
       session = await prisma.$transaction(async (tx) => {
         await lockActiveUserForUpdate(tx, request.user.id);
+        await assertOwnedFolderLocked(tx, request.user.id, request.body.folderId);
+        // Parts and the assembled output may coexist: reserve 2x expected bytes.
+        await claimTemporary({
+          userId: request.user.id, objectKey: "session:" + sessionId,
+          kind: "SESSION", bytes: expectedSize * 2n,
+          leaseMs: (config.uploadSessionExpiresMinutes + 5) * 60000
+        }, tx);
         const reservation = await reservePendingUploadQuota(request.user.id, expectedSize, tx);
         if (!reservation) {
           const error = new Error("Storage quota exceeded");
@@ -187,6 +238,7 @@ async function uploadRoutes(app) {
             mimeType: request.body.mimeType.trim().slice(0, 255),
             expectedSize,
             expectedChecksum,
+            folderId: request.body.folderId || null,
             chunkSize,
             partCount,
             expiresAt: new Date(Date.now() + config.uploadSessionExpiresMinutes * 60 * 1000)
@@ -204,6 +256,9 @@ async function uploadRoutes(app) {
       await storage.deleteUploadSessionChunks(sessionId).catch(() => {});
       if (error.code === "STORAGE_QUOTA_EXCEEDED") {
         return reply.code(413).send({ message: "Storage quota exceeded" });
+      }
+      if (error.code === "TEMP_STORAGE_BUDGET_EXCEEDED") {
+        return reply.code(507).send({ message: "Temporary upload storage is at capacity" });
       }
       throw error;
     }
@@ -224,18 +279,68 @@ async function uploadRoutes(app) {
     preHandler: requireAuth,
     schema: {
       tags: ["Files"],
-      summary: "Inspect resumable upload progress",
-      security: [{ bearerAuth: [] }]
+      summary: "Inspect resumable upload progress, optionally as a bounded page or summary",
+      description: "Default view=legacy preserves uploadedParts and missingParts arrays. view=summary returns counts without a manifest; view=page returns up to 100 uploaded parts with an exclusive afterPart cursor. Completion validates the authoritative full manifest regardless of this response.",
+      security: [{ bearerAuth: [] }],
+      querystring: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          view: { type: "string", enum: ["legacy", "summary", "page"] },
+          afterPart: { type: "integer", minimum: -1, maximum: 10000 },
+          limit: { type: "integer", minimum: 1, maximum: 100 }
+        }
+      }
     }
   }, async (request, reply) => {
-    let session = await loadOwnedSession(request.user.id, request.params.id, true);
+    const view = request.query.view || "legacy";
+    let session = await loadOwnedSession(request.user.id, request.params.id, view === "legacy");
     if (!session) return reply.code(404).send({ message: "Upload session not found" });
 
     if (await expireIfNeeded(session, storage)) {
-      session = await loadOwnedSession(request.user.id, request.params.id, true);
+      session = await loadOwnedSession(request.user.id, request.params.id, view === "legacy");
     }
+    if (!session) return reply.code(404).send({ message: "Upload session not found" });
+    if (view === "legacy") return { session: serializeSession(session, session.parts) };
 
-    return { session: serializeSession(session, session.parts) };
+    const afterPart = request.query.afterPart ?? -1;
+    const limit = request.query.limit ?? 100;
+
+    // One repeatable-read snapshot keeps the session status, counts and page mutually consistent.
+    // The indexed (sessionId, partNumber) keyset bounds SQL rows and response size at 101.
+    const progress = await prisma.$transaction(async (tx) => {
+      const current = await tx.uploadSession.findFirst({
+        where: { id: request.params.id, userId: request.user.id }
+      });
+      if (!current) return null;
+      const uploadedCount = await tx.uploadPart.count({ where: { sessionId: current.id } });
+      const base = {
+        ...serializeSessionBase(current),
+        uploadedCount,
+        missingCount: Math.max(0, current.partCount - uploadedCount)
+      };
+      if (view === "summary") return base;
+
+      const rows = await tx.uploadPart.findMany({
+        where: { sessionId: current.id, partNumber: { gt: afterPart } },
+        orderBy: { partNumber: "asc" },
+        take: limit + 1
+      });
+      const hasMore = rows.length > limit;
+      const page = rows.slice(0, limit);
+      return {
+        ...base,
+        uploadedParts: page.map(serializePart),
+        partsPage: {
+          afterPart,
+          limit,
+          hasMore,
+          nextAfterPart: hasMore ? page[page.length - 1].partNumber : null
+        }
+      };
+    }, { isolationLevel: "RepeatableRead" });
+    if (!progress) return reply.code(404).send({ message: "Upload session not found" });
+    return { session: progress };
   });
 
   app.put("/upload-sessions/:id/parts/:partNumber", {
@@ -323,6 +428,9 @@ async function uploadRoutes(app) {
       await pipeline(data.file, hasher, storage.createUploadPartWriteStream(session.id, storedName));
     } catch (error) {
       await storage.deleteUploadPart(session.id, storedName).catch(() => false);
+      if (error.code === "ENOSPC" || error.code === "EDQUOT") {
+        return reply.code(507).send({ message: "Temporary upload storage is full; retry this part" });
+      }
       if (error.code === "ENOENT") {
         // The session's chunk directory vanished: it was aborted, expired or completed while
         // this body was streaming. That is a conflict, not a server error.
@@ -452,13 +560,49 @@ async function uploadRoutes(app) {
     // so a stalled or recovered ("zombie") completer can never publish a file.
     const heartbeat = startLeaseHeartbeat(session.id, token, leaseMs);
     const giveBack = () => relinquishCompletion(session.id, token).catch(() => false);
+    try {
+      await ensurePhysicalHeadroom(storage, BigInt(session.expectedSize));
+    } catch (error) {
+      heartbeat.stop();
+      await giveBack();
+      if (error.code === "TEMP_STORAGE_BUDGET_EXCEEDED") {
+        return reply.code(507).send({ message: "Not enough physical space to assemble upload" });
+      }
+      throw error;
+    }
     const storedName = crypto.randomUUID();
+    const assemblyKey = "assembly:" + storedName;
+    let assemblyClaim;
+    try {
+      assemblyClaim = await reserveTemporary({
+        userId: request.user.id, objectKey: assemblyKey, kind: "ASSEMBLY",
+        // Accounted for by the session's existing 2x reservation.
+        bytes: 0n, leaseMs: Math.max(120000, leaseMs)
+      });
+    } catch (error) {
+      heartbeat.stop();
+      await giveBack();
+      if (error.code === "TEMP_STORAGE_BUDGET_EXCEEDED") {
+        return reply.code(507).send({ message: "Concurrent temporary object limit reached" });
+      }
+      throw error;
+    }
+    const assemblyHeartbeat = startTempHeartbeat(assemblyKey, assemblyClaim.token, Math.max(120000, leaseMs));
+    const deleteAbandonedAssembly = async () => {
+      assemblyHeartbeat.stop();
+      const removed = await storage.delete(storedName).then(() => true).catch(() => false);
+      if (removed) await releaseTemporary(assemblyKey, assemblyClaim.token).catch(() => null);
+    };
     let assembled;
     try {
       assembled = await storage.assembleUploadParts(session.id, session.parts, storedName, { signal: app.vaultboxShutdownSignal });
     } catch (error) {
       heartbeat.stop();
+      await deleteAbandonedAssembly();
       await giveBack();
+      if (error.code === "ENOSPC" || error.code === "EDQUOT") {
+        return reply.code(507).send({ message: "Assembly storage is full; upload remains retryable" });
+      }
       if (error.name === "AbortError") {
         // Shutdown began mid-assembly: the partial object is gone and the session is retryable.
         reply.header("Retry-After", "5");
@@ -484,13 +628,13 @@ async function uploadRoutes(app) {
 
     if (assembled.size !== BigInt(session.expectedSize)) {
       heartbeat.stop();
-      await storage.delete(storedName).catch(() => false);
+      await deleteAbandonedAssembly();
       await giveBack();
       return reply.code(422).send({ message: "Assembled upload size mismatch" });
     }
     if (session.expectedChecksum && assembled.checksum !== session.expectedChecksum) {
       heartbeat.stop();
-      await storage.delete(storedName).catch(() => false);
+      await deleteAbandonedAssembly();
       await giveBack();
       return reply.code(422).send({ message: "Final upload checksum mismatch" });
     }
@@ -502,9 +646,11 @@ async function uploadRoutes(app) {
         await lockActiveUserForUpdate(tx, request.user.id);
         const owned = await tx.uploadSession.findFirst({
           where: { id: session.id, userId: request.user.id, status: "COMPLETING", completionToken: token },
-          select: { id: true }
+          select: { id: true, folderId: true }
         });
         if (!owned) throw leaseLostError();
+        await assertOwnedFolderLocked(tx, request.user.id, owned.folderId);
+        await assertTemporaryOwned(tx, assemblyKey, assemblyClaim.token);
 
         const quota = await commitUploadReservation(request.user.id, session.expectedSize, tx);
         if (!quota) {
@@ -521,6 +667,7 @@ async function uploadRoutes(app) {
             size: assembled.size,
             path: storedName,
             checksum: assembled.checksum,
+            folderId: owned.folderId,
             userId: request.user.id
           }
         });
@@ -551,7 +698,14 @@ async function uploadRoutes(app) {
       }));
     } catch (error) {
       heartbeat.stop();
-      await storage.delete(storedName).catch(() => false);
+      if (error.code === "TEMP_CLAIM_LOST") {
+        // A reconciler owns this stale object now; do not unlink bytes from
+        // under its lease. Yield completion so the client can retry safely.
+        assemblyHeartbeat.stop();
+        await giveBack();
+        return reply.code(409).send({ message: "Assembly ownership expired; retry upload completion" });
+      }
+      await deleteAbandonedAssembly();
       if (error.code === "UPLOAD_COMPLETION_LEASE_LOST") {
         // Someone else now owns (or has finished) this session; touch nothing of theirs.
         return reply.code(409).send({ message: "Upload completion lease was lost; retry completion" });
@@ -560,10 +714,22 @@ async function uploadRoutes(app) {
       throw error;
     }
     heartbeat.stop();
+    assemblyHeartbeat.stop();
+    // File row and bytes committed: this object is now durable, not temporary.
+    await releaseTemporary(assemblyKey, assemblyClaim.token).catch((error) =>
+      request.log.warn({ err: error }, "Assembly ledger cleanup delayed")
+    );
 
-    await storage.deleteUploadSessionChunks(session.id).catch((error) => {
+    try {
+      await storage.deleteUploadSessionChunks(session.id);
+      await prisma.uploadSession.updateMany({
+        where: { id: session.id, status: "COMPLETED" },
+        data: { chunksCleanedAt: new Date() }
+      });
+      await releaseTemporary("session:" + session.id);
+    } catch (error) {
       request.log.warn({ err: error, sessionId: session.id }, "Upload committed but chunk cleanup failed");
-    });
+    }
     return {
       message: "Upload completed",
       sessionId: session.id,
@@ -583,6 +749,19 @@ async function uploadRoutes(app) {
     };
   });
 
+  async function cleanupTerminalSession(session) {
+    try {
+      await storage.deleteUploadSessionChunks(session.id);
+      await prisma.uploadSession.updateMany({
+        where: { id: session.id, status: { in: ["ABORTED", "EXPIRED", "COMPLETED"] } },
+        data: { chunksCleanedAt: new Date() }
+      });
+      await releaseTemporary("session:" + session.id);
+    } catch (error) {
+      app.log.warn({ err: error }, "Terminal upload byte cleanup deferred to worker");
+    }
+  }
+
   app.delete("/upload-sessions/:id", {
     preHandler: requireAuth,
     schema: {
@@ -597,7 +776,7 @@ async function uploadRoutes(app) {
       return reply.code(409).send({ message: "Completed uploads cannot be aborted" });
     }
     if (session.status === "ABORTED" || session.status === "EXPIRED") {
-      await storage.deleteUploadSessionChunks(session.id).catch(() => {});
+      await cleanupTerminalSession(session);
       return { message: `Upload session is already ${session.status.toLowerCase()}` };
     }
     if (session.status !== "UPLOADING") {
@@ -615,7 +794,7 @@ async function uploadRoutes(app) {
       })
     });
     if (!aborted) return reply.code(409).send({ message: "Upload session state changed concurrently" });
-    await storage.deleteUploadSessionChunks(session.id).catch(() => {});
+    await cleanupTerminalSession(session);
     return { message: "Upload session aborted" };
   });
 }

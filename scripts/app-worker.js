@@ -10,10 +10,24 @@ const path = require("node:path");
 const buildApp = require("../src/app");
 const { LocalStorageAdapter } = require("../src/lib/storage");
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "vaultbox-app-worker-"));
+const root = process.env.WORKER_STORAGE_ROOT ||
+  fs.mkdtempSync(path.join(os.tmpdir(), "vaultbox-app-worker-"));
+class FaultableWorkerStorage extends LocalStorageAdapter {
+  async assembleUploadParts(sessionId, parts, finalKey, options = {}) {
+    const result = await super.assembleUploadParts(sessionId, parts, finalKey, options);
+    if (process.env.WORKER_PAUSE_AFTER_ASSEMBLY === "1") {
+      process.send?.({ phase: "assembled-before-db", sessionId, finalKey });
+      // Test-only controlled barrier: parent SIGKILL simulates the crash after bytes
+      // are durable but before the File + quota transaction.
+      await new Promise(() => {});
+    }
+    return result;
+  }
+}
 const app = buildApp({
   logger: false,
-  storage: new LocalStorageAdapter(root),
+  storage: process.env.WORKER_PAUSE_AFTER_ASSEMBLY === "1"
+    ? new FaultableWorkerStorage(root) : new LocalStorageAdapter(root),
   config: {
     nodeEnv: "test",
     isProduction: false,

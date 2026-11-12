@@ -1,7 +1,7 @@
 const prisma = require("../lib/prisma");
 const { requireAuth } = require("../middleware/auth");
 const { validateIdempotencyKey, runIdempotent } = require("../lib/idempotency");
-const { lockActiveUserShared } = require("../lib/upload-session");
+const { lockActiveUserShared, lockActiveUserForUpdate } = require("../lib/upload-session");
 const { decodeCursor, cursorWhere, cursorOrderBy, finishCursorPage } = require("../lib/pagination");
 
 const folderCursorOptions = { sort: "createdAt", order: "desc", type: "date" };
@@ -98,7 +98,8 @@ async function folderRoutes(app) {
           pagination: { type: "string", enum: ["page", "cursor"] },
           page: { type: "integer", minimum: 1, maximum: 100 },
           cursor: { type: "string", maxLength: 1024 },
-          limit: { type: "integer", minimum: 1, maximum: 100 }
+          limit: { type: "integer", minimum: 1, maximum: 100 },
+          includeTotal: { type: "boolean", description: "Page mode: false skips the exact total count and returns a bounded hasMore page." }
         }
       }
     }
@@ -126,6 +127,23 @@ async function folderRoutes(app) {
       });
       const result = finishCursorPage(rows, limit, folderCursorOptions);
       return { folders: result.items, pagination: { ...result.pagination, limit } };
+    }
+
+    if (request.query.includeTotal === false) {
+      const rows = await prisma.folder.findMany({
+        where,
+        include: { _count: { select: { files: true } } },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        skip: (page - 1) * limit,
+        take: limit + 1
+      });
+      return {
+        folders: rows.slice(0, limit),
+        pagination: {
+          mode: "page", page, limit, total: null, pages: null,
+          hasMore: rows.length > limit
+        }
+      };
     }
 
     const [total, folders] = await prisma.$transaction([
@@ -180,20 +198,30 @@ async function folderRoutes(app) {
       security: [{ bearerAuth: [] }]
     }
   }, async (request, reply) => {
-    const folder = await prisma.folder.findFirst({
-      where: { id: request.params.id, userId: request.user.id }
-    });
-    if (!folder) return reply.code(404).send({ message: "Folder not found" });
-
-    await prisma.$transaction([
-      prisma.file.updateMany({
-        where: { folderId: folder.id, userId: request.user.id },
+    // Enforce one lock order for moves/uploads/deletes: User then Folder.
+    // A move's shared Folder lock and this exclusive lock serialize, so no
+    // committed file can retain a removed or foreign folder ID.
+    const removed = await prisma.$transaction(async (tx) => {
+      await lockActiveUserForUpdate(tx, request.user.id);
+      const rows = await tx.$queryRawUnsafe(
+        'SELECT "id" FROM "Folder" WHERE "id" = $1 AND "userId" = $2 FOR UPDATE',
+        request.params.id, request.user.id
+      );
+      if (!rows.length) return false;
+      await tx.uploadSession.updateMany({
+        where: { userId: request.user.id, folderId: request.params.id },
         data: { folderId: null }
-      }),
-      prisma.folder.delete({ where: { id: folder.id } })
-    ]);
+      });
+      await tx.file.updateMany({
+        where: { folderId: request.params.id, userId: request.user.id },
+        data: { folderId: null }
+      });
+      await tx.folder.delete({ where: { id: request.params.id } });
+      return true;
+    });
+    if (!removed) return reply.code(404).send({ message: "Folder not found" });
 
-    return { message: "Folder deleted successfully; contained files were moved to the root" };
+    return { message: "Folder deleted successfully; contained files and pending uploads were moved to the root" };
   });
 }
 

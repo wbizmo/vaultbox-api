@@ -1,0 +1,104 @@
+name: One-time approved v2.5.0 publication after verified main and Render
+
+# Owner authorized the v2.5.0 production release. This workflow has no
+# general-purpose auto-release rule: it can publish ONLY v2.5.0, once, after
+# main CI passes and the live Render health endpoints report v2.5.0.
+on:
+  workflow_run:
+    workflows: [VaultBox CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vaultbox-v2.5.0-once
+  cancel-in-progress: false
+
+jobs:
+  publish-once:
+    if: >-
+      github.repository == 'wbizmo/vaultbox-api' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    env:
+      RELEASE_VERSION: 2.5.0
+      RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+      GH_TOKEN: ${{ github.token }}
+      RENDER_URL: https://vaultbox-api-ucff.onrender.com
+    steps:
+      - name: Checkout exact verified main commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: Use checked-in Node version
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+
+      - name: Verify version, main SHA, changelog and successful main CI
+        run: |
+          set -euo pipefail
+          test "$(node -p 'require("./package.json").version')" = "2.5.0"
+          main_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)"
+          gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
+            --commit "$RELEASE_SHA" --limit 100 \
+            --json headSha,headBranch,event,status,conclusion > /tmp/vaultbox-ci-runs.json
+          node scripts/verify-release-gate.js \
+            --version=2.5.0 --sha="$RELEASE_SHA" \
+            --main-sha="$main_sha" --runs=/tmp/vaultbox-ci-runs.json
+
+      - name: Verify actual Render v2.5.0 live health before publishing
+        run: |
+          set -euo pipefail
+          ok=0
+          for attempt in $(seq 1 18); do
+            if curl -fsS --max-time 25 "$RENDER_URL/health" > /tmp/vaultbox-health.json \
+              && curl -fsS --max-time 25 "$RENDER_URL/infra/health" > /tmp/vaultbox-infra.json \
+              && node -e '
+                const fs=require("fs");
+                const h=JSON.parse(fs.readFileSync("/tmp/vaultbox-health.json","utf8"));
+                const i=JSON.parse(fs.readFileSync("/tmp/vaultbox-infra.json","utf8"));
+                if(h.version!=="2.5.0"||h.status!=="ok"||i.status!=="healthy"||
+                   i.checks?.database?.status!=="online"||i.checks?.redis?.status!=="online")
+                  process.exit(1);
+              '; then
+              ok=1
+              break
+            fi
+            echo "Render v2.5.0 not verified yet (attempt $attempt)"
+            sleep 15
+          done
+          if [ "$ok" != "1" ]; then
+            echo "::error::Render did not report v2.5.0 healthy. No GitHub release will be published."
+            exit 1
+          fi
+          rm -f /tmp/vaultbox-health.json /tmp/vaultbox-infra.json
+
+      - name: Publish immutable v2.5.0 release for exact verified commit
+        run: |
+          set -euo pipefail
+          main_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)"
+          test "$main_sha" = "$RELEASE_SHA"
+          if gh release view v2.5.0 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "v2.5.0 already exists; refusing to republish"
+            exit 0
+          fi
+          refs="$(git ls-remote --tags origin 'refs/tags/v2.5.0' 'refs/tags/v2.5.0^{}')"
+          if [ -n "$refs" ]; then
+            echo "::error::v2.5.0 tag exists without a release; inspect manually"
+            exit 1
+          fi
+          gh release create v2.5.0 --repo "$GITHUB_REPOSITORY" \
+            --target "$RELEASE_SHA" \
+            --title "VaultBox API v2.5.0: Reliability, Security, Performance and Folder APIs" \
+            --notes-file docs/RELEASE_NOTES_v2.5.0.md

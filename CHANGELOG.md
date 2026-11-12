@@ -4,6 +4,21 @@ All notable changes to VaultBox API are documented here.
 
 ## [Unreleased]
 
+Further changes after the v2.5.0 candidate should be recorded here.
+
+## [2.5.0] - 2026-11-12
+
+This consolidates the **v2.3** reliability, **v2.4** performance/security, and **v2.5** folder/quota roadmaps in a single deliverable; v2.3.0 and v2.4.0 were not published as separate GitHub releases. See [v2.5.0 cumulative notes](./docs/RELEASE_NOTES_v2.5.0.md), [v2.3 grouping](./docs/RELEASE_NOTES_v2.3.0.md), [v2.4 grouping](./docs/RELEASE_NOTES_v2.4.0.md) and [benchmark evidence](./docs/BENCHMARKS_v2.5.0.md).
+
+### Added and improved
+
+- Folder-aware uploads, `PATCH /files/:id` moves, root/folder listing and folder-deletion detachment (#64); reservation-aware quota including immediately available bytes (#65).
+- Stream-safe optional S3 adapter and checksum-verifying, dry-run migration tool (#53). **Real provider deployment, IAM and cutover are UNVERIFIED; no production S3 provider selected.**
+- Temporary storage budgets, orphan cleanup, stream aborts, retention pruning and fenced multi-worker cleanup (#55–#57, #59).
+- Compact 10k-part progress views and optional count-free file/folder/admin pages with deterministic sort tie-breaker (#60, #63).
+- 3 benchmark suites with reproducible CI evidence and measured 8k-row pagination improvement (#58); BOLA, process crash and malformed transfer regressions (#61).
+- Exact-SHA manual release approval, pinned Node/Prisma, predeploy migration contract, security-extended CodeQL and production-focused CI (#62).
+
 ### Fixed
 
 - **File deletion removes the bytes durably, with retries (#54).** `DELETE /files/:id` committed the logical deletion and quota refund, then removed the bytes outside the transaction and only logged a failure: a failed removal left an unreachable object on storage forever (a repeated `DELETE` saw a non-`ACTIVE` file and did nothing). The new `FileDeletion` outbox row is inserted in the **same statement** that marks the file `DELETED` and refunds quota, so the three cannot disagree and the job exists exactly once per file. A worker (every replica, every 60 s, plus an immediate attempt from the request) claims due rows under a lease (`FOR UPDATE SKIP LOCKED`), removes the bytes (an already-missing object counts as success), and otherwise retries with exponential backoff (30 s doubling to 1 h, +/-20% jitter), parking the job as `DEAD` after 8 attempts. A worker killed mid-deletion simply lets its lease lapse and another picks the job up (a worker that returns after its lease lapsed cannot overwrite the newer claim, and a job whose workers keep dying on the final attempt is parked as `DEAD` instead of being retried forever); retries never touch `File` or quota, so nothing is refunded twice or resurrected. The admin-only `/metrics` gains `fileDeletions` (pending, retrying, dead, age of the oldest, unreclaimed bytes); finished rows are pruned after 7 days. Streams already open when a file is deleted run to completion; new downloads of a deleted file are refused (documented). API behavior is unchanged: the response is still `200` once the deletion has committed. Migration `20261105300000_file_deletion_outbox` adds one table (no foreign keys). Files deleted before this release have no job (their bytes, if any, are for the orphan reconciliation in #55).
@@ -140,3 +155,7 @@ See [`docs/RELEASE_NOTES_v2.2.0.md`](./docs/RELEASE_NOTES_v2.2.0.md) for behavio
 ## [1.0.0] - 2026-06-18
 
 Initial production release with authentication, plans and quotas, file/folder operations, signed downloads, administration, billing simulation, PostgreSQL persistence, Redis integration, health monitoring, and Swagger/OpenAPI documentation.
+
+## [2.5.0] — Unreleased (consolidated v2.3–v2.5 draft PR #88)
+
+Includes shared-storage tooling (provider unverified), durable temp-byte admission/orphan reconciliation, cleanup/retention, real HTTP and PostgreSQL benchmarks, 10k-part pagination, independent-process security/fault testing, manually gated releases, folder-aware uploads and accurate reserved quota reporting. See `docs/RELEASE_NOTES_v2.5.0.md`. Do not treat this section as a shipped release.

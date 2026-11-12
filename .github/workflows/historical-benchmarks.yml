@@ -1,0 +1,123 @@
+name: Historical VaultBox release benchmarks (isolated tags)
+
+# Only the feature branch's initial workflow addition automatically runs
+# historical tags. Future repetitions are deliberate/manual (not every push).
+on:
+  push:
+    branches: [feat/vaultbox-v2.3-to-v2.5-consolidated]
+    paths: [.github/workflows/historical-benchmarks.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  history:
+    # Subsequent branch pushes only retry v1's legacy npm install.
+    # Manual dispatches select the complete published-tag matrix.
+    name: Benchmark ${{ matrix.release }}
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["v1.0.0","v2.0.0","v2.1.0","v2.1.1","v2.2.0","candidate"]' || '["v1.0.0"]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: benchmark
+          POSTGRES_PASSWORD: benchmark
+          POSTGRES_DB: benchmark
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U benchmark -d benchmark"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://benchmark:benchmark@127.0.0.1:5432/benchmark
+      REDIS_URL: redis://127.0.0.1:6379
+      JWT_SECRET: benchmark-history-only-secret-long-enough
+      RELEASE_TAG: ${{ matrix.release }}
+      BENCH_HIST_REQUESTS: "100"
+    steps:
+      - name: Checkout exact historical release
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ matrix.release == 'candidate' && github.sha || matrix.release }}
+          path: release
+          persist-credentials: false
+
+      - name: Checkout current isolated historical harness
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: harness
+          persist-credentials: false
+
+      - name: Pin the historical Node runtime
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: release/.node-version
+
+      - name: Replace v1 archived private registry mirror with integrity-checked public URLs
+        if: matrix.release == 'v1.0.0'
+        working-directory: release
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          lock = Path("package-lock.json")
+          original = lock.read_text()
+          prefix = "http://package-firewall.replit.local/npm/"
+          if prefix not in original:
+              raise SystemExit("Expected historical Replit mirror not present")
+          data_before = json.loads(original)
+          converted = original.replace(prefix, "https://registry.npmjs.org/")
+          data_after = json.loads(converted)
+          for key, desc in data_before.get("packages", {}).items():
+              updated = data_after.get("packages", {}).get(key, {})
+              if desc.get("version") != updated.get("version") or desc.get("integrity") != updated.get("integrity"):
+                  raise SystemExit("Dependency identity/integrity must remain unchanged: " + key)
+          lock.write_text(converted)
+          print("Rebased archived registry URLs only; versions and integrity preserved")
+          PY
+
+      - name: Install only that release's locked dependencies
+        working-directory: release
+        run: npm ci --no-audit --no-fund
+
+      - name: Generate the version-matched Prisma client and migrate disposable database
+        working-directory: release
+        run: |
+          ./node_modules/.bin/prisma generate
+          ./node_modules/.bin/prisma migrate deploy
+
+      - name: Record candidate or published tag commit
+        working-directory: release
+        run: echo "RELEASE_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Common health, system, plan API load profile
+        working-directory: release
+        run: |
+          set -euo pipefail
+          node ../harness/scripts/benchmark-history.js | tee historical-benchmark.json
+
+      - name: Retain raw historical measurements even for a failed tag
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: vaultbox-history-${{ matrix.release }}
+          path: release/historical-benchmark.json
+          retention-days: 30

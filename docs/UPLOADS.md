@@ -93,7 +93,9 @@ The database uniqueness constraint on `(sessionId, partNumber)` prevents duplica
 
 ### 3. Inspect and resume
 
-`GET /upload-sessions/:id` reports uploaded and missing part numbers. After interruption, clients resend only missing parts rather than retransmitting the complete file.
+`GET /upload-sessions/:id` (default `view=legacy`) reports uploaded and missing part numbers. After interruption, clients resend only missing parts rather than retransmitting the complete file.
+
+For large uploads, use `GET /upload-sessions/:id?view=summary` for `uploadedCount` and `missingCount` without allocating a manifest. Use `?view=page&limit=100&afterPart=-1` for bounded, indexed pages of uploaded parts; advance the exclusive cursor using `partsPage.nextAfterPart` while `hasMore` is true. Each page is a consistent snapshot limited to 100 entries. New concurrent uploads may appear in later polls; completion always revalidates the authoritative database manifest. The default legacy response remains unchanged.
 
 ### 4. Complete
 
@@ -162,3 +164,17 @@ Completion re-reads the part set after claiming the session and asserts it compl
 ## Storage-adapter boundary
 
 The current deployed adapter stores final and temporary bytes on Render-local storage. The upload-session/part model is intentionally compatible with a future multipart object-storage adapter so the public protocol can remain stable when the byte-storage provider changes.
+
+### Optional folder destination (draft #64)
+
+An owned folder can be supplied at upload start (`x-folder-id` header for `POST /files/upload`, `folderId` JSON field for `POST /upload-sessions`). All ownership checks occur inside the transaction recording the file or session. When the destination folder is deleted while a resumable upload is pending, the session is retargeted to root; its eventual completion never writes a dangling folder reference. `PATCH /files/:id` accepts `folderId` to move an already stored file, including `null` for root. File moves never change quotas or object bytes.
+
+### Temporary-byte budgets, disk pressure, crash recovery (v2.5.0 draft)
+
+Each one-shot stream creates an owned, durable \`TemporaryObject\` claim *before* writing. Declared-length uploads reserve that length, and legacy headerless uploads conservatively reserve the configured maximum. A resumable session reserves **2× expected file bytes** for parts plus assembly; an additional zero-byte assembly-key marker prevents a crashed completer's unreferenced output from being collected while valid. PostgreSQL's transaction advisory lock serializes global/per-user byte and in-flight-count admission across processes. Caps are \`VAULTBOX_TEMP_GLOBAL_BYTES\`, \`VAULTBOX_TEMP_USER_BYTES\`, \`VAULTBOX_TEMP_GLOBAL_CLAIMS\`, \`VAULTBOX_TEMP_USER_CLAIMS\`; operators MUST size them to *actual persistent disk capacity*, not the generous safe-compatibility defaults. Before local writing, statfs checks physical free space plus \`VAULTBOX_TEMP_MIN_FREE_BYTES\`.
+
+Claims persist after process death. One-shot streams heartbeat their claim; final DB commit verifies current ownership. Closed resumable sessions keep their claims until physical chunk deletion is confirmed and \`chunksCleanedAt\` set; deletion errors retain the ledger and are retried by #59 workers. The reconciler processes at most \`VAULTBOX_RECONCILE_BATCH_SIZE\` stale claims per cycle, only after \`VAULTBOX_ORPHAN_GRACE_MS\`, and validates object age and database references before unlinking. It reports missing committed file objects **without deleting File metadata or refunding quota**, and reports unknown unclaimed legacy files **without deleting them**. A persistent per-adapter directory cursor scans additional bounded batches on later sweeps, avoiding indefinite starvation of names beyond the first batch; the cursor resets after a complete pass or process restart. For an optional S3 adapter, stale FILE and ASSEMBLY claims can now be conservatively reconciled without bucket inventory: the worker first fences the writer in the DB, waits at least the configured grace, HEADs the object timestamp before any delete, and retains a VERIFYING tombstone through a second grace period so late objects are not silently forgotten. SESSION chunk cleanup remains handled by the separately leased #59 worker. This logic is tested against stubs and a local emulator only: no production provider, remote lifecycle policy, cross-host failure or IAM acceptance is verified or promised. This avoids deleting live legacy streams that predate the ledger.
+
+An ENOSPC/EDQUOT write or assembly error returns HTTP **507** rather than a generic 500, preserves resumable progress, releases one-shot quota when appropriate and allows later retry. Physical disk exhaustion can still impact the host if budget settings are incorrect or the disk is shared with untracked processes; monitor \`statfs\` and compare actual bytes to ledger reservations.
+
+The migration adds only the \`TemporaryObject\` table; **do not run this version of the API against an unmigrated database**. Rollback requires freezing new uploads, letting the cleanup sweeper drain, preserving orphan evidence, and retaining the additive table until no active claims remain. No data is deleted by the migration itself.

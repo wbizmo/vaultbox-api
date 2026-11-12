@@ -31,29 +31,72 @@ async function planRoutes(app) {
     schema: {
       tags: ["Plans"],
       summary: "Get current user's storage quota",
-      security: [{ bearerAuth: [] }]
+      description: "storageUsed and usagePercent remain committed-only. reservedUploadBytes tracks outstanding upload reservations; totalAllocatedBytes and allocatedUsagePercent include reservations. availableBytes is immediately allocatable capacity. Byte counts are precise decimal strings.",
+      security: [{ bearerAuth: [] }],
+      response: {
+        200: {
+          type: "object",
+          required: ["quota"],
+          properties: {
+            quota: {
+              type: "object",
+              required: ["plan", "storageUsed", "committedStorageUsed", "reservedUploadBytes", "totalAllocatedBytes", "storageLimit", "storageUsedFormatted", "storageLimitFormatted", "usagePercent", "allocatedUsagePercent", "availableBytes", "status"],
+              properties: {
+                plan: { type: "string" },
+                storageUsed: { type: "string", description: "Committed bytes; backwards compatible" },
+                committedStorageUsed: { type: "string" },
+                reservedUploadBytes: { type: "string" },
+                totalAllocatedBytes: { type: "string" },
+                storageLimit: { type: "string" },
+                storageUsedFormatted: { type: "string" },
+                storageLimitFormatted: { type: "string" },
+                usagePercent: { type: "number", description: "Committed-only percentage" },
+                allocatedUsagePercent: { type: "number", description: "Committed plus reserved percentage" },
+                availableBytes: { type: "string", description: "Non-negative immediately allocatable bytes" },
+                status: { type: "string" }
+              }
+            }
+          }
+        }
+      }
     }
   }, async (request) => {
-    const user = await prisma.user.findUnique({
-      where: { id: request.user.id },
-      include: { plan: true }
-    });
+    // A single SQL statement takes a coherent MVCC snapshot of account and plan.
+    // The actor id is bound as a parameter; the statement text is constant.
+    const rows = await prisma.$queryRawUnsafe(
+      'SELECT u."storageUsed", u."reservedUploadBytes", u."status", ' +
+      'p."storageLimit", p."name" AS "planName" ' +
+      'FROM "User" u LEFT JOIN "Plan" p ON p."id" = u."planId" ' +
+      'WHERE u."id" = $1',
+      request.user.id
+    );
+    const user = rows[0];
+    if (!user) throw new AppError(404, "USER_NOT_FOUND", "User not found");
 
-    const storageUsed = user.storageUsed || 0n;
-    const storageLimit = user.plan?.storageLimit || 0n;
+    const storageUsed = user.storageUsed ?? 0n;
+    const reservedUploadBytes = user.reservedUploadBytes ?? 0n;
+    const storageLimit = user.storageLimit ?? 0n;
+    const totalAllocatedBytes = storageUsed + reservedUploadBytes;
     const usagePercent = storageLimit > 0n
       ? Number((storageUsed * 10000n) / storageLimit) / 100
+      : 0;
+    const allocatedUsagePercent = storageLimit > 0n
+      ? Number((totalAllocatedBytes * 10000n) / storageLimit) / 100
       : 0;
 
     return {
       quota: {
-        plan: user.plan?.name || "No Plan",
+        plan: user.planName || "No Plan",
         storageUsed: storageUsed.toString(),
+        committedStorageUsed: storageUsed.toString(),
+        reservedUploadBytes: reservedUploadBytes.toString(),
+        totalAllocatedBytes: totalAllocatedBytes.toString(),
         storageLimit: storageLimit.toString(),
         storageUsedFormatted: formatBytes(storageUsed),
         storageLimitFormatted: formatBytes(storageLimit),
         usagePercent,
-        availableBytes: (storageLimit > storageUsed ? storageLimit - storageUsed : 0n).toString(),
+        allocatedUsagePercent,
+        availableBytes: (storageLimit > totalAllocatedBytes ? storageLimit - totalAllocatedBytes : 0n).toString(),
         status: user.status
       }
     };

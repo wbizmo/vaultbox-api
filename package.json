@@ -1,17 +1,25 @@
 {
   "name": "vaultbox-api",
-  "version": "2.2.0",
+  "version": "2.5.0",
   "description": "Secure cloud storage API with resumable chunked uploads, range downloads, atomic quota enforcement, Redis coordination, audit logs, and administrative controls.",
   "main": "src/server.js",
   "scripts": {
-    "dev": "nodemon src/server.js",
-    "start": "npx --yes prisma@6.12.0 generate && npx --yes prisma@6.12.0 migrate deploy && node src/server.js",
-    "build": "echo build skipped",
-    "lint": "npx --yes eslint@10.10.0 src scripts test prisma",
+    "dev": "node --watch src/server.js",
+    "postinstall": "node scripts/render-install.js",
+    "prestart": "node scripts/render-startup.js",
+    "start": "node src/server.js",
+    "build": "npm run deploy:generate && npm run typecheck && node scripts/verify-build.js",
+    "lint": "eslint src scripts test prisma",
     "test": "node --test --test-concurrency=1",
     "benchmark": "node scripts/benchmark.js",
-    "deploy:migrate": "npx prisma migrate deploy",
-    "seed": "node prisma/seed.js"
+    "deploy:migrate": "prisma migrate deploy",
+    "seed": "node prisma/seed.js",
+    "deploy:generate": "prisma generate",
+    "benchmark:transfers": "node scripts/benchmark-transfers.js",
+    "benchmark:queries": "node scripts/profile-postgres.js",
+    "security:scan": "node scripts/security-static-check.js",
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "benchmark:capabilities": "node scripts/benchmark-capabilities.js"
   },
   "keywords": [
     "cloud-storage",
@@ -37,6 +45,8 @@
     "npm": ">=11 <12"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "3.1165.0",
+    "@aws-sdk/lib-storage": "3.1165.0",
     "@fastify/cors": "^11.2.0",
     "@fastify/jwt": "^10.2.2",
     "@fastify/multipart": "^10.1.1",
@@ -47,10 +57,12 @@
     "bcryptjs": "^3.0.3",
     "dotenv": "^17.4.2",
     "fastify": "^5.12.1",
+    "prisma": "6.12.0",
     "redis": "^6.2.1"
   },
   "devDependencies": {
-    "nodemon": "^3.1.14",
-    "prisma": "6.12.0"
+    "@types/node": "24.10.0",
+    "eslint": "9.39.5",
+    "typescript": "5.9.3"
   }
 }

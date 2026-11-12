@@ -20,8 +20,12 @@ const {
   releaseReservation
 } = require("../lib/upload-reservation");
 const { lockActiveUserForUpdate } = require("../lib/upload-session");
+const { assertOwnedFolderLocked } = require("../lib/folder-ownership");
 const { retryOnConflict } = require("../lib/db-retry");
-const { decodeCursor, cursorWhere, cursorOrderBy, finishCursorPage } = require("../lib/pagination");
+const { reserveTemporary, startTempHeartbeat, assertTemporaryOwned,
+  releaseTemporary, ensurePhysicalHeadroom } = require("../lib/temporary-storage");
+const { decodeCursor, finishCursorPage } = require("../lib/pagination");
+const { fileCursorOrderBy, fileCursorWhere } = require("../lib/file-order");
 
 const fileCursorTypes = {
   createdAt: "date",
@@ -85,7 +89,8 @@ async function fileRoutes(app) {
             type: "string",
             pattern: "^[0-9]+$",
             description: "Optional exact file byte count. When supplied, VaultBox reserves quota before reading the multipart file body."
-          }
+          },
+          "x-folder-id": { type: "string", minLength: 1, maxLength: 255, description: "Optional owned destination folder ID; validated transactionally at commit." }
         }
       }
     }
@@ -97,6 +102,13 @@ async function fileRoutes(app) {
 
     if (!user?.plan) {
       return reply.code(403).send({ message: "No active storage plan found" });
+    }
+
+    const folderId = request.headers["x-folder-id"] === undefined
+      ? null
+      : String(request.headers["x-folder-id"]);
+    if (folderId !== null && (!folderId.trim() || folderId.length > 255)) {
+      return reply.code(400).send({ message: "x-folder-id must identify a folder" });
     }
 
     const expectedSize = declaredUploadSize(request, app.vaultboxConfig.maxUploadBytes);
@@ -150,18 +162,46 @@ async function fileRoutes(app) {
     const originalName = String(data.filename || "upload").slice(0, 255);
     const mimeType = String(data.mimetype || "application/octet-stream").slice(0, 255);
     const storedName = crypto.randomUUID();
+    const tempKey = "file:" + storedName;
+    let tempClaim;
+    try {
+      // Headerless one-shot uploads reserve the configured maximum, since their
+      // actual size is not known until after streaming (and must still be capped).
+      await ensurePhysicalHeadroom(storage,
+        expectedSize === null ? BigInt(app.vaultboxConfig.maxUploadBytes) : expectedSize);
+      tempClaim = await reserveTemporary({
+        userId: user.id, objectKey: tempKey, kind: "FILE",
+        bytes: expectedSize === null ? BigInt(app.vaultboxConfig.maxUploadBytes) : expectedSize,
+        leaseMs
+      });
+    } catch (error) {
+      await releaseEarlyReservation();
+      if (error.code === "TEMP_STORAGE_BUDGET_EXCEEDED") {
+        return reply.code(507).send({ message: "Temporary upload storage is at capacity" });
+      }
+      throw error;
+    }
+    const tempHeartbeat = startTempHeartbeat(tempKey, tempClaim.token, leaseMs);
+    const removeTempBytes = async () => {
+      tempHeartbeat.stop();
+      const removed = await storage.delete(storedName).then(() => true).catch(() => false);
+      if (removed) await releaseTemporary(tempKey, tempClaim.token).catch(() => null);
+    };
     const hasher = new HashingTransform("sha256");
 
     try {
       await pipeline(data.file, hasher, storage.createWriteStream(storedName));
     } catch (error) {
-      await storage.delete(storedName).catch(() => false);
+      await removeTempBytes();
       await releaseEarlyReservation();
+      if (error.code === "ENOSPC" || error.code === "EDQUOT") {
+        return reply.code(507).send({ message: "Temporary storage is full; retry later" });
+      }
       throw error;
     }
 
     if (data.file.truncated) {
-      await storage.delete(storedName).catch(() => false);
+      await removeTempBytes();
       await releaseEarlyReservation();
       return reply.code(413).send({ message: "Upload exceeds its declared or configured file-size limit" });
     }
@@ -169,7 +209,7 @@ async function fileRoutes(app) {
     const fileSize = hasher.bytes;
     const checksum = hasher.digest();
     if (expectedSize !== null && fileSize !== expectedSize) {
-      await storage.delete(storedName).catch(() => false);
+      await removeTempBytes();
       await releaseEarlyReservation();
       return reply.code(422).send({
         message: "Uploaded byte count does not match x-upload-size",
@@ -187,6 +227,7 @@ async function fileRoutes(app) {
         // Account-state fence at the commit point: a suspension that landed while the body streamed
         // rejects the commit (403) and the bytes + reservation are given back by the catch below.
         await lockActiveUserForUpdate(tx, user.id);
+        await assertTemporaryOwned(tx, tempKey, tempClaim.token);
         const reservation = expectedSize === null
           ? await reserveUploadQuota(user.id, fileSize, tx)
           : await commitReservation(tx, reservationId, user.id, fileSize);
@@ -201,8 +242,10 @@ async function fileRoutes(app) {
           throw quotaError;
         }
 
+        await assertOwnedFolderLocked(tx, user.id, folderId);
         const created = await tx.file.create({
           data: {
+            folderId,
             originalName,
             storedName,
             mimeType,
@@ -229,9 +272,13 @@ async function fileRoutes(app) {
       file = committed.file;
       admittedQuota = committed.reservation;
       heartbeat?.stop();
+      tempHeartbeat.stop();
+      await releaseTemporary(tempKey, tempClaim.token).catch((error) =>
+        request.log.warn({ err: error }, "Committed file temporary ledger release delayed")
+      );
       reservationId = null; // converted atomically with the file; nothing left to release
     } catch (error) {
-      await storage.delete(storedName).catch(() => false);
+      await removeTempBytes();
       await releaseEarlyReservation();
 
       if (error.code === "STORAGE_QUOTA_EXCEEDED") {
@@ -279,7 +326,9 @@ async function fileRoutes(app) {
           page: { type: "integer", minimum: 1, maximum: 100 },
           cursor: { type: "string", maxLength: 1024 },
           limit: { type: "integer", minimum: 1, maximum: 100 },
+          includeTotal: { type: "boolean", description: "Page mode only: default true; false skips the potentially expensive count and returns total/pages null with hasMore." },
           search: { type: "string", maxLength: 120 },
+          folderId: { type: "string", minLength: 1, maxLength: 255, description: "Owned folder ID or root for files without a folder" },
           sort: { type: "string", enum: ["createdAt", "updatedAt", "size", "originalName"] },
           order: { type: "string", enum: ["asc", "desc"] }
         }
@@ -295,6 +344,7 @@ async function fileRoutes(app) {
     const baseWhere = {
       userId: request.user.id,
       status: "ACTIVE",
+      ...(request.query.folderId === undefined ? {} : { folderId: request.query.folderId === "root" ? null : request.query.folderId }),
       ...(search ? { originalName: { contains: search, mode: "insensitive" } } : {})
     };
 
@@ -310,8 +360,8 @@ async function fileRoutes(app) {
       }
 
       const rows = await prisma.file.findMany({
-        where: { AND: [baseWhere, cursorWhere(decoded, options)] },
-        orderBy: cursorOrderBy(sort, order),
+        where: { AND: [baseWhere, fileCursorWhere(decoded, sort, order)] },
+        orderBy: fileCursorOrderBy(sort, order),
         take: limit + 1
       });
       const result = finishCursorPage(rows, limit, options);
@@ -322,11 +372,30 @@ async function fileRoutes(app) {
       };
     }
 
+    if (request.query.includeTotal === false) {
+      // A single bounded indexed query avoids an O(matching rows) count,
+      // preserving the legacy count behavior unless clients explicitly opt out.
+      const rows = await prisma.file.findMany({
+        where: baseWhere,
+        orderBy: fileCursorOrderBy(sort, order),
+        skip: (page - 1) * limit,
+        take: limit + 1
+      });
+      return {
+        files: rows.slice(0, limit).map(serializeFile),
+        pagination: {
+          mode: "page", page, limit,
+          total: null, pages: null,
+          hasMore: rows.length > limit
+        }
+      };
+    }
+
     const [total, files] = await prisma.$transaction([
       prisma.file.count({ where: baseWhere }),
       prisma.file.findMany({
         where: baseWhere,
-        orderBy: { [sort]: order },
+        orderBy: fileCursorOrderBy(sort, order),
         skip: (page - 1) * limit,
         take: limit
       })
@@ -342,6 +411,45 @@ async function fileRoutes(app) {
         pages: Math.max(1, Math.ceil(total / limit))
       }
     };
+  });
+
+  app.patch("/files/:id", {
+    onRequest: requireAuth,
+    schema: {
+      tags: ["Files"],
+      summary: "Move an owned file to an owned folder or root without changing its bytes or quota",
+      security: [{ bearerAuth: [] }],
+      body: {
+        type: "object",
+        additionalProperties: false,
+        required: ["folderId"],
+        properties: {
+          folderId: { anyOf: [{ type: "string", minLength: 1, maxLength: 255 }, { type: "null" }] }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    const folderId = request.body.folderId;
+    const moved = await retryOnConflict(() => prisma.$transaction(async (tx) => {
+      await lockActiveUserForUpdate(tx, request.user.id);
+      await assertOwnedFolderLocked(tx, request.user.id, folderId);
+      // An atomic owner/status predicate also fences a concurrent file deletion.
+      const updated = await tx.file.updateMany({
+        where: { id: request.params.id, userId: request.user.id, status: "ACTIVE" },
+        data: { folderId }
+      });
+      if (updated.count !== 1) return null;
+      const file = await tx.file.findUnique({ where: { id: request.params.id } });
+      await recordAudit(tx, {
+        action: "FILE_MOVED",
+        details: file.id + ":" + (folderId ?? "root"),
+        userId: request.user.id,
+        ip: clientIp(request)
+      });
+      return file;
+    }));
+    if (!moved) return reply.code(404).send({ message: "File not found" });
+    return { message: "File moved successfully", file: serializeFile(moved) };
   });
 
   app.delete("/files/:id", {

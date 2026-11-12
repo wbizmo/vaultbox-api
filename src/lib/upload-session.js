@@ -3,6 +3,7 @@ const prisma = require("./prisma");
 const { releaseUploadReservation } = require("./quota");
 const { retryOnConflict } = require("./db-retry");
 const { AppError } = require("./errors");
+const { releaseTemporary } = require("./temporary-storage");
 
 /*
  * Lock acquisition order (documented invariant, see docs/UPLOADS.md):
@@ -322,51 +323,218 @@ async function recoverStaleCompletion(session, client = prisma) {
 async function expireIfNeeded(session, storage, client = prisma) {
   if (session.status !== "UPLOADING" || session.expiresAt > new Date()) return false;
   const expired = await releaseSession(session, "EXPIRED", client);
-  if (expired) await storage.deleteUploadSessionChunks(session.id).catch(() => {});
+  if (expired) {
+    try {
+      await storage.deleteUploadSessionChunks(session.id);
+      await client.uploadSession.updateMany({
+        where: { id: session.id, status: "EXPIRED" },
+        data: { chunksCleanedAt: new Date() }
+      });
+      await releaseTemporary("session:" + session.id, null, client);
+    } catch {
+      // Session is closed; the leased cleanup worker retries physical bytes.
+    }
+  }
   return expired;
 }
 
-async function cleanupUploadSessions(storage, client = prisma) {
-  const now = new Date();
-  const candidates = await client.uploadSession.findMany({
-    where: {
-      OR: [
-        { status: "UPLOADING", expiresAt: { lte: now } },
-        // Only completers that stopped heartbeating are recovered; a long but
-        // healthy assembly keeps renewing its lease and is never reclaimed.
-        staleCompletionWhere(now)
-      ]
-    },
-    take: 100
+
+const CLEANUP_DEFAULTS = Object.freeze({
+  batchSize: 100, concurrency: 4, leaseSeconds: 120, deleteTimeoutMs: 30000
+});
+
+function cleanupSettings(env = process.env) {
+  const v = {
+    batchSize: Number(env.VAULTBOX_UPLOAD_CLEANUP_BATCH_SIZE ?? CLEANUP_DEFAULTS.batchSize),
+    concurrency: Number(env.VAULTBOX_UPLOAD_CLEANUP_CONCURRENCY ?? CLEANUP_DEFAULTS.concurrency),
+    leaseSeconds: Number(env.VAULTBOX_UPLOAD_CLEANUP_LEASE_SECONDS ?? CLEANUP_DEFAULTS.leaseSeconds),
+    deleteTimeoutMs: Number(env.VAULTBOX_UPLOAD_CLEANUP_DELETE_TIMEOUT_MS ?? CLEANUP_DEFAULTS.deleteTimeoutMs)
+  };
+  for (const [key, min, max] of [
+    ["batchSize", 1, 250], ["concurrency", 1, 16],
+    ["leaseSeconds", 30, 600], ["deleteTimeoutMs", 1000, 120000]
+  ]) {
+    if (!Number.isSafeInteger(v[key]) || v[key] < min || v[key] > max) {
+      throw new Error("Invalid upload cleanup setting " + key);
+    }
+  }
+  return v;
+}
+
+let lastCleanupStats = null;
+function getUploadCleanupStats() { return lastCleanupStats && { ...lastCleanupStats }; }
+
+async function claimCleanupCandidates(client, kind, settings, now = new Date()) {
+  if (!["expired", "terminal"].includes(kind)) throw new Error("Invalid cleanup kind");
+  const leaseUntil = new Date(now.getTime() + settings.leaseSeconds * 1000);
+  const token = crypto.randomUUID();
+  const staleCutoff = new Date(now.getTime() - LEGACY_COMPLETING_STALE_MS);
+  const terminalCutoff = new Date(now.getTime() - 60000);
+  const where = kind === "expired"
+    ? `(("status" = 'UPLOADING'::"UploadSessionStatus" AND "expiresAt" <= $1)
+      OR ("status" = 'COMPLETING'::"UploadSessionStatus"
+       AND (("completionLeaseUntil" IS NOT NULL AND "completionLeaseUntil" <= $1)
+         OR ("completionLeaseUntil" IS NULL AND "updatedAt" <= $2))))`
+    : `("status" IN ('COMPLETED'::"UploadSessionStatus",
+      'ABORTED'::"UploadSessionStatus", 'EXPIRED'::"UploadSessionStatus")
+      AND "chunksCleanedAt" IS NULL AND ("updatedAt" <= $2 OR "cleanupAttempts" > 0))`;
+  const result = await client.$queryRawUnsafe(`
+    WITH candidates AS (
+      SELECT "id" FROM "UploadSession"
+      WHERE ("cleanupLeaseUntil" IS NULL OR "cleanupLeaseUntil" <= $1)
+        AND ${where}
+      ORDER BY ${kind === "expired" ? '"expiresAt"' : '"updatedAt"'}, "id"
+      LIMIT $3 FOR UPDATE SKIP LOCKED
+    )
+    UPDATE "UploadSession" s
+    SET "cleanupToken" = $4, "cleanupLeaseUntil" = $5
+    FROM candidates c WHERE s."id" = c."id"
+    RETURNING s.*
+  `, now, kind === "expired" ? staleCutoff : terminalCutoff,
+    settings.batchSize, token, leaseUntil);
+  return { candidates: result, token };
+}
+
+async function finishCleanupClaim(client, sessionId, token, { completed = false, failure = null } = {}) {
+  if (completed) {
+    return client.uploadSession.updateMany({
+      where: { id: sessionId, cleanupToken: token },
+      data: {
+        cleanupToken: null, cleanupLeaseUntil: null, cleanupAttempts: 0,
+        cleanupLastError: null, chunksCleanedAt: new Date()
+      }
+    });
+  }
+  if (!failure) {
+    return client.uploadSession.updateMany({
+      where: { id: sessionId, cleanupToken: token },
+      data: { cleanupToken: null, cleanupLeaseUntil: null }
+    });
+  }
+  const observed = await client.uploadSession.findFirst({
+    where: { id: sessionId, cleanupToken: token },
+    select: { cleanupAttempts: true }
+  });
+  if (!observed) return { count: 0 };
+  const attempts = Math.min(observed.cleanupAttempts + 1, 16);
+  const delay = Math.min(3600, 10 * Math.pow(2, Math.min(8, attempts - 1)));
+  return client.uploadSession.updateMany({
+    where: { id: sessionId, cleanupToken: token },
+    data: {
+      cleanupToken: null, cleanupAttempts: attempts,
+      cleanupLeaseUntil: new Date(Date.now() + delay * 1000),
+      cleanupLastError: failure
+    }
+  });
+}
+
+async function deleteChunksWithTimeout(storage, sessionId, timeoutMs) {
+  let timer;
+  try {
+    await Promise.race([
+      storage.deleteUploadSessionChunks(sessionId),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("STORAGE_CLEANUP_TIMEOUT")), timeoutMs);
+        timer.unref();
+      })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function runBounded(items, concurrency, fn) {
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (cursor < items.length) {
+      const item = items[cursor++];
+      await fn(item);
+    }
+  }));
+}
+
+async function cleanupUploadSessions(storage, client = prisma, overrides = {}) {
+  const settings = { ...cleanupSettings(), ...overrides };
+  const started = Date.now();
+  const stats = {
+    claimed: 0, expired: 0, recovered: 0, terminal: 0,
+    failures: 0, retried: 0, pendingBacklog: 0, terminalBacklog: 0,
+    retryBacklog: 0, oldestPendingAt: null, oldestTerminalAt: null, durationMs: 0
+  };
+
+  const expired = await claimCleanupCandidates(client, "expired", settings);
+  stats.claimed = expired.candidates.length;
+  await runBounded(expired.candidates, settings.concurrency, async (session) => {
+    try {
+      let transitioned;
+      if (session.status === "COMPLETING") {
+        const status = await recoverStaleCompletion(session, client);
+        transitioned = status === "EXPIRED";
+        if (status === "UPLOADING") stats.recovered++;
+      } else {
+        transitioned = await releaseSession(session, "EXPIRED", client);
+      }
+      if (!transitioned) {
+        await finishCleanupClaim(client, session.id, expired.token);
+        return;
+      }
+      stats.expired++;
+      await deleteChunksWithTimeout(storage, session.id, settings.deleteTimeoutMs);
+      await finishCleanupClaim(client, session.id, expired.token, { completed: true });
+      await releaseTemporary("session:" + session.id, null, client);
+    } catch {
+      stats.failures++;
+      stats.retried++;
+      await finishCleanupClaim(client, session.id, expired.token, {
+        failure: "SESSION_TRANSITION_OR_STORAGE_FAILED"
+      });
+    }
   });
 
-  for (const session of candidates) {
-    if (session.status === "COMPLETING") {
-      const outcome = await recoverStaleCompletion(session, client).catch(() => null);
-      if (outcome === "EXPIRED") await storage.deleteUploadSessionChunks(session.id).catch(() => {});
-      continue;
+  const terminal = await claimCleanupCandidates(client, "terminal", settings);
+  await runBounded(terminal.candidates, settings.concurrency, async (session) => {
+    try {
+      await deleteChunksWithTimeout(storage, session.id, settings.deleteTimeoutMs);
+      await finishCleanupClaim(client, session.id, terminal.token, { completed: true });
+      await releaseTemporary("session:" + session.id, null, client);
+      stats.terminal++;
+    } catch {
+      stats.failures++;
+      stats.retried++;
+      await finishCleanupClaim(client, session.id, terminal.token, {
+        failure: "STORAGE_CHUNKS_DELETE_FAILED"
+      });
     }
-    const released = await releaseSession(session, "EXPIRED", client).catch(() => false);
-    if (released) await storage.deleteUploadSessionChunks(session.id).catch(() => {});
-  }
+  });
 
-  // One-shot upload reservations share this sweeper (lazy require: upload-reservation imports this module).
+  // Keep prior bounded reservation and idempotency cleanup behavior. Failures
+  // here do not unwind successfully transitioned upload sessions.
   await require("./upload-reservation").reconcileExpiredReservations(client).catch(() => 0);
-
-  // Expired idempotency records are pruned by the same shared sweeper (bounded batch).
   await require("./idempotency").pruneExpiredIdempotencyKeys(client).catch(() => 0);
 
-  const terminal = await client.uploadSession.findMany({
-    where: {
-      status: { in: ["COMPLETED", "ABORTED", "EXPIRED"] },
-      updatedAt: { lte: new Date(Date.now() - 60 * 1000) }
-    },
-    select: { id: true },
-    take: 100
-  });
-  await Promise.all(terminal.map((session) => storage.deleteUploadSessionChunks(session.id).catch(() => {})));
-
-  return candidates.length;
+  const now = new Date();
+  const expiredWhere = { status: "UPLOADING", expiresAt: { lte: now } };
+  const terminalWhere = {
+    status: { in: ["COMPLETED", "ABORTED", "EXPIRED"] },
+    chunksCleanedAt: null, updatedAt: { lte: new Date(now.getTime() - 60000) }
+  };
+  const [pendingBacklog, terminalBacklog, retries, pendingAge, terminalAge] = await Promise.all([
+    client.uploadSession.count({ where: expiredWhere }),
+    client.uploadSession.count({ where: terminalWhere }),
+    client.uploadSession.count({
+      where: { cleanupAttempts: { gt: 0 }, chunksCleanedAt: null }
+    }),
+    client.uploadSession.aggregate({ where: expiredWhere, _min: { expiresAt: true } }),
+    client.uploadSession.aggregate({ where: terminalWhere, _min: { updatedAt: true } })
+  ]);
+  stats.pendingBacklog = pendingBacklog;
+  stats.terminalBacklog = terminalBacklog;
+  stats.retryBacklog = retries;
+  stats.oldestPendingAt = pendingAge._min.expiresAt?.toISOString() ?? null;
+  stats.oldestTerminalAt = terminalAge._min.updatedAt?.toISOString() ?? null;
+  stats.durationMs = Date.now() - started;
+  lastCleanupStats = stats;
+  return stats.claimed;
 }
 
 module.exports = {
@@ -389,5 +557,8 @@ module.exports = {
   recoverStaleCompletion,
   isStaleCompletion,
   expireIfNeeded,
-  cleanupUploadSessions
+  cleanupUploadSessions,
+  cleanupSettings,
+  claimCleanupCandidates,
+  getUploadCleanupStats
 };

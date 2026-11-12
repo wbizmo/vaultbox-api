@@ -34,7 +34,7 @@ function errorSummary(error) {
  * Claim up to `limit` due rows (optionally one specific file). Claiming bumps `attempts` and sets the lease,
  * so a worker that dies mid-delete simply lets the lease lapse and another worker (or the next sweep) retries.
  */
-async function claimFileDeletions({ limit = DEFAULTS.batchSize, leaseMs = DEFAULTS.leaseMs, fileId = null } = {}, client = prisma) {
+async function claimFileDeletions({ limit = DEFAULTS.batchSize, leaseMs = DEFAULTS.leaseMs, fileId = null, userId = null } = {}, client = prisma) {
   return client.$queryRaw`
     UPDATE "FileDeletion"
     SET "attempts" = "attempts" + 1,
@@ -45,6 +45,7 @@ async function claimFileDeletions({ limit = DEFAULTS.batchSize, leaseMs = DEFAUL
         AND "nextAttemptAt" <= NOW()
         AND ("lockedUntil" IS NULL OR "lockedUntil" <= NOW())
         AND (${fileId}::text IS NULL OR "fileId" = ${fileId})
+        AND (${userId}::text IS NULL OR "userId" = ${userId})
       ORDER BY "nextAttemptAt", "createdAt"
       LIMIT ${limit}
       FOR UPDATE SKIP LOCKED
@@ -61,7 +62,7 @@ async function claimFileDeletions({ limit = DEFAULTS.batchSize, leaseMs = DEFAUL
 async function finishOne(storage, row, options, client) {
   try {
     // true = removed now, false = already gone: both are a finished cleanup.
-    await storage.deleteFile({ storedName: row.storedName });
+    await storage.deleteFile({ id: row.fileId, storedName: row.storedName });
   } catch (error) {
     const dead = row.attempts >= options.maxAttempts;
     const delay = backoffMs(row.attempts, options);
@@ -110,7 +111,7 @@ async function processFileDeletions(storage, overrides = {}, client = prisma) {
   await deadLetterExhaustedFileDeletions(options.maxAttempts, client).catch((error) => {
     options.log?.warn({ err: error }, "File deletion dead-letter reaper failed");
   });
-  const rows = await claimFileDeletions({ limit: options.batchSize, leaseMs: options.leaseMs, fileId: options.fileId || null }, client);
+  const rows = await claimFileDeletions({ limit: options.batchSize, leaseMs: options.leaseMs, fileId: options.fileId || null, userId: options.userId || null }, client);
   const outcome = { claimed: rows.length, done: 0, retry: 0, dead: 0 };
   // Every claimed row holds a lease from the moment it was claimed, so start them all at once (the batch is
   // bounded): a slow storage call must not run the clock down on the rows queued behind it.

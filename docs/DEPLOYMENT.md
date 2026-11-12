@@ -1,22 +1,30 @@
-# VaultBox production deployment
+# VaultBox deployment: Render Free compatibility and production alternatives
 
-VaultBox v2.2.0 targets deployment on **Render + Neon PostgreSQL + Upstash Redis**.
+VaultBox v2.5.0 retains all existing API, security, storage-adapter and transfer capabilities. The current live deployment is **Render Free + Neon PostgreSQL + Upstash Redis**. The operator has explicitly chosen **no paid persistent disk and no production S3 provider** for this deployment. This is a **disposable demonstration / ephemeral-file mode**, not reliable durable storage for user files.
 
-## Production contract
+## Render Free deployment contract (supported v2.5.0 compatibility mode)
 
-Render tracks the repository `main` branch with auto-deploy enabled.
+The existing Render service `srv-d8or9sgg4nts73f8tat0` auto-deploys `main`, build command `rm -rf node_modules package-lock.json && npm install --omit=dev`, start command `npm start`; Render Free has **no separate pre-deploy command**. Keep this service configuration unchanged for this compatibility rollout:
 
-The service start command is `npm start`. In v2.1.x that script deliberately performs:
+1. Root `postinstall` invokes `scripts/render-install.js` only when Render sets `RENDER=true` and `RENDER_SERVICE_TYPE=web`. It uses the **installed pinned Prisma CLI**, runs `prisma generate` and verifies generated models, route imports and release notes. It works with production-only dependencies, and **does not** require TypeScript, `npx` or `npm run build` from the current Render build command.
+2. Explicitly set **`VAULTBOX_RENDER_FREE_MODE=1`** on this service. Root `prestart` invokes `scripts/render-startup.js`. This hook refuses to run outside a **production Render web service**, checks `DATABASE_URL` and uses the **installed pinned Prisma CLI** to run `migrate deploy`. Prisma's built-in migration advisory locking serializes migrations; failures stop the new instance before the HTTP listener opens. No external package download, `db push` or dev dependencies are used.
+3. Root `start` remains `node src/server.js`. Running without `VAULTBOX_RENDER_FREE_MODE=1` keeps the original separate-migration release contract on every other platform. GitHub Actions still verifies generation, migrations and the full CI suite explicitly.
+4. On Free, cold starts/restarts can rerun `migrate deploy` (idempotent when no migrations are pending), increasing startup time. The **one-instance-only** Render Free limitation is crucial; do not use this fallback for scale-out/zero-downtime multi-replica schema changes. For paid Render, run `npm run deploy:migrate` in an approved pre-deploy stage and leave this flag off.
+5. The existing Render command removes `package-lock.json`, but npm still uses the **tracked `npm-shrinkwrap.json`** for production dependency resolution. The production dependency `prisma@6.12.0` is present in that shrinkwrap, so there is no need to fetch an ad-hoc Prisma version at boot. CI uses `npm ci`.
 
-```text
-prisma generate
-prisma migrate deploy
-node src/server.js
-```
+### Ephemeral storage limitation: explicit operator acceptance
 
-The API therefore does not bind its public port until committed Prisma migrations have been applied to Neon.
+**File bytes on Render Free are lost on deploy, restart, suspension or inactivity-induced spin-down (after 15 minutes of no traffic).** Neon metadata/quota may survive even if the corresponding bytes do not. Uploads, streaming, chunking, hashed range downloads, folder operations, reconciliation, cleanup workers and optional S3 adapter are **still implemented and tested**, but do not turn ephemeral bytes into durable storage. Treat the live endpoint as an evaluation/demo system only, not durable customer storage or a compliant backup. On missing bytes, recovery reports discrepancies; it does **not** fabricate files or silently delete metadata.
 
-This is important because the existing Render build command installs production dependencies but does not itself run `prisma migrate deploy`.
+The v2.5.0 PR intentionally retains the S3 adapter and checksum migration code for future use, but **no real production S3 provider is configured** and provider IAM/cutover, cross-host durability and storage persistence acceptance remain **UNVERIFIED**. No persistent disk is being purchased. Before testing a new deploy, communicate that old uploaded local files may already be gone; do not describe a healthy `/health` as proof that every stored object survives.
+
+### Release sequencing and verification
+
+- GitHub: exact-head PR CI green; merge PR #88, then **exact merged-main SHA** CI green; publish v2.5.0 by manual `release-v2.yml` on that SHA only.
+- Render: allow the existing commit-trigger auto-deploy, identify the exact deployed main commit and require a `live` successful deploy. Inspect logs for **Prisma generation at build**, **migrate deploy at startup**, no migration errors, and Node 24 runtime. `/health` must report `version=2.5.0`; `/infra/health` database and Redis online.
+- Verify new routes and OpenAPI version, and (where disposable test credentials exist) authenticated quota/folder/file/range/cleanup smoke. Make no false claim that file bytes persist after spin-down.
+- If the new deploy fails, Render should continue serving its last successful deployment. With **additive migrations**, rolling back code does not necessarily roll back schema. Document applied migrations and watch logs.
+- All performance and historical release comparisons must be measured, not guessed: see [benchmark evidence](./BENCHMARKS_v2.5.0.md).
 
 ## Node.js runtime
 
@@ -62,7 +70,7 @@ Upload/download controls can be tuned with:
 
 **Guarantee.** Authentication reads the account's status, role and *session version* (`User.authVersion`) from PostgreSQL on every request; nothing about authorization is cached in Redis or in process memory. Once a suspension, deletion, demotion or session revocation has committed, the **next request on every instance is rejected** — revocation latency is zero and does not depend on Redis being up. A request that had already passed authentication before the change is not interrupted, but it can no longer **create new usage**: every transaction that creates storage, a session, a file, a folder, a download token or changes the plan takes the owner's row lock and requires `ACTIVE` at its commit point (details below). If the database lookup itself fails, authentication answers `503` (never `401`), so an outage cannot be mistaken for a revoked credential.
 
-**Rolling deploys and rollbacks.** The guarantee holds on an instance only while it runs this release, and for the whole fleet only once **every** instance does. During the overlap an old-build instance never reads `authVersion`: a session revoked with `revokeSessions`, or a suspension that is later reversed by reactivation, can still succeed there until the token's own JWT expiry, and a login served by an old-build instance after a version bump issues a token with no `av` claim that new instances reject with `401` (the user simply signs in again once the rollout is done). So: finish the rollout before revoking sessions or reactivating accounts. Rolling the application back to a build from before this release disables `authVersion` enforcement on those instances until they are replaced; the additive column itself is safe to leave in place. `npm start` regenerates the Prisma client before migrating, so a cached `node_modules` cannot keep a client that predates `authVersion`.
+**Rolling deploys and rollbacks.** The guarantee holds on an instance only while it runs this release, and for the whole fleet only once **every** instance does. During the overlap an old-build instance never reads `authVersion`: a session revoked with `revokeSessions`, or a suspension that is later reversed by reactivation, can still succeed there until the token's own JWT expiry, and a login served by an old-build instance after a version bump issues a token with no `av` claim that new instances reject with `401` (the user simply signs in again once the rollout is done). So: finish the rollout before revoking sessions or reactivating accounts. Rolling the application back to a build from before this release disables `authVersion` enforcement on those instances until they are replaced; the additive column itself is safe to leave in place. The Render Free compatibility hook generates Prisma at install time and applies pending migrations before startup; other platforms use their separate migration stage. Old-build instances can still be incompatible during rolling deploys.
 
 **Commit-time account check (in-flight requests).** `requireAuth` runs before a handler starts, so an upload that is still streaming when an administrator suspends the account has already been authenticated. These transitions therefore re-check the account *inside* their own transaction, under the owner's `User` row lock (the same row a suspension updates), so each one either commits entirely before the suspension or is refused with `403 ACCOUNT_NOT_ACTIVE` and leaves nothing behind:
 
@@ -311,3 +319,107 @@ Builds that predate the plan-entitlement release do not check entitlements: roll
 Builds that predate download-token revocation (everything before v2.2.0, including v2.1.1) do not check `DownloadToken.revokedAt`: after a rollback to one, a download URL that was revoked (by the revoke endpoints or by "log out everywhere") works again until its stored `expiresAt`, and revocation stays disabled for as long as that build runs. The column and migration are harmless to leave in place. If revocation matters during an incident, fix forward instead of rolling back; if you must roll back, treat every download URL issued before the rollback as live until it expires. For a suspected leak, do not restore traffic until the latest stored expiry among the pre-rollback sessions has passed (`SELECT max("expiresAt") FROM "DownloadToken" WHERE "revokedAt" IS NOT NULL OR "expiresAt" > now();` -- the current setting is not a valid bound, since older sessions may have been issued under a longer one), or invalidate all existing tokens through a mechanism the rollback build enforces (for example by deleting the rows). Lowering `DOWNLOAD_TOKEN_EXPIRES_MINUTES` only limits URLs issued after the rollback; it does not shorten existing ones.
 
 Builds that predate upload reservations cannot reconcile `PENDING` `UploadReservation` rows, so a rollback to one can leave `reservedUploadBytes` held for uploads that were in flight or had crashed. After such a rollback, run the quota-leak query from the schema section above when no uploads are in flight and investigate any rows it returns before correcting values.
+
+### Transfer metadata retention (draft #57)
+
+Every 5 minutes (also on startup), each instance runs an independent bounded metadata-pruning pass; PostgreSQL row locks with SKIP LOCKED prevent duplicate worker claims. Each resource is pruned in keyset order in batches (default 100 per pass, maximum 500). Terminal upload sessions (COMPLETED, ABORTED, EXPIRED) older than 30 days are removed with UploadPart rows by cascade, never active/COMPLETING sessions. Download tokens are removed only once expired for over 30 days. These operations do not touch durable File, quotas or audit evidence. File-deletion outbox retention is separately managed by the existing outbox worker; pending/dead entries are not pruned.
+
+Configuration: VAULTBOX_METADATA_PRUNE_BATCH_SIZE=100 (1..500), VAULTBOX_UPLOAD_METADATA_RETENTION_DAYS=30 (1..3650), VAULTBOX_DOWNLOAD_METADATA_RETENTION_DAYS=30 (1..3650), VAULTBOX_AUDIT_RETENTION_DAYS=0 (0 disables deletion). AuditLog deletion is OFF by default; enabling it requires explicit owner approval of statutory retention requirements, legal holds, archiving and rollback/backup procedure before setting a positive value. Operators must capture backups before enabling audit pruning; restoration requires DB backups. Prune counts are logged as Transfer metadata pruned, errors as warnings. Alert if warnings persist, if the backlog increases across intervals, or if the oldest eligible terminal session is older than two retention intervals.
+
+Deployment: apply the two additive ordered cleanup indexes in migration 20261110110000_metadata_retention. To disable pruning without reverting schema, stop the cleanup scheduler or deploy the prior app version (indexes can safely remain); do not attempt to recreate deleted metadata without a backup. On a representative database verify indexed ordered scans with EXPLAIN (ANALYZE, BUFFERS) before production cutover.
+
+
+### Durable shared S3-compatible storage (draft #53)
+
+`STORAGE_BACKEND=local` remains the default development adapter. Multi-replica production **must** explicitly use `STORAGE_BACKEND=s3` and a private bucket whose existence/read permissions are verified during application startup. The S3-compatible backend stores immutable files under `S3_OBJECT_PREFIX/objects/<storedName>` and upload parts under `S3_OBJECT_PREFIX/parts/<session>/<storedName>`, so every replica sees exactly the same objects. It uses bounded streaming writes and multipart uploads, S3 byte-range reads, conditionally create-only object keys, server-side encryption, and idempotent deletes. Content integrity is still checked by the existing SHA-256 completion and download contracts. Object encryption, transport TLS, versioning and least-privilege IAM/bucket policy must be configured on the storage provider.
+
+Configuration: `S3_BUCKET` and `S3_REGION` are required, `S3_ENDPOINT` is optional for third-party compatible storage, `S3_FORCE_PATH_STYLE=true` for providers needing path-style requests, `S3_OBJECT_PREFIX` defaults to `vaultbox`, `S3_SERVER_SIDE_ENCRYPTION` defaults to `AES256`. Use the AWS SDK credential chain (workload identity preferred); do not embed keys in a repository or process logs. Grant only `s3:HeadBucket`/bucket-head equivalent, `s3:ListBucket` on the managed prefix, and `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, multipart abort/list permissions for the prefix. Verify the provider enforces conditional `If-None-Match: *` for single and multipart object creation; keys are random and preflight HEAD is a second safeguard, not a substitute for atomic conditional storage operations.
+
+**No automatic production migration.** Existing Render local-file data may be ephemeral; restore any missing bytes from backups *before* the cutover. A mixed local/S3 deployment cannot safely handle active uploads. Freeze all writes (including background workers), finish or abort resumable sessions, drain upload reservations and the file-deletion outbox, and take consistent database + local-object backups. From a host with access to the existing local upload tree and private S3 bucket, run the following without disclosing credentials:
+
+```bash
+# Dry-run: hashes committed local files and reports missing S3 targets; writes nothing
+node scripts/migrate-local-to-s3.js --limit=500
+# After approval and reliable backup: copy + verify every file checksum
+node scripts/migrate-local-to-s3.js --apply --limit=500
+# Repeat with --after=<lastId> from each batch until scanned < limit
+# Independent full remote read/rehash; refuses missing or mismatched objects
+node scripts/migrate-local-to-s3.js --verify-only --limit=500
+```
+
+The tool rejects active upload sessions, pending quota reservations and unfinished/dead byte-deletion outbox entries, and never overwrites existing S3 keys, deletes original bytes or mutates the File table. Existing S3 objects are rehashed before accepting resumed runs. It processes keyset-ordered, bounded file pages. Use `--user-id=<id>` for an authorized per-user migration; still freeze all writes globally. Ensure **all** active File rows are copied and verified before setting `STORAGE_BACKEND=s3`; test upload from one replica and download/range/HEAD from a second replica, delete/retry and restart. Confirm no unmatched objects or unsettled reservations. Preserve the local backup until the S3 deployment has passed smoke tests and the rollback window closes.
+
+**Rollback:** before new S3 writes, restore the old runtime and `STORAGE_BACKEND=local` with the untouched local filesystem and database snapshot. Once new files have been written to S3, switching back without a reverse verified copy would lose user data; freeze writes and explicitly copy/checksum the new objects back, then restore a compatible database state. Never delete source data during a rollback. For provider portability, exercise the optional `VAULTBOX_S3_TEST_ENDPOINT` integration tests against a disposable compatible endpoint with controlled credentials; no test credentials or test-only emulator are part of the production image.
+
+### Explicit release promotion (draft #62)
+
+Release publishing no longer runs automatically after any push or successful CI. Only a deliberate GitHub Actions `workflow_dispatch` invocation of `.github/workflows/release-v2.yml` with an exact **stable version** and **full SHA** can publish. The workflow requires a completed, successful **push CI on protected main at exactly that SHA**, a matching `package.json` version, matching release notes and title, and the same current main HEAD at the moment of publication. It refuses divergent tags or existing releases, runs under a single concurrency group, uses minimal token permissions and a `vaultbox-release` approval environment.
+
+Before enabling the workflow, configure **required human reviewers for the `vaultbox-release` environment** in GitHub repository settings; YAML declaring an environment alone does not enforce reviewers. Keep `main` branch protection and the `VaultBox CI` required check enabled. Draft PR checks are skipped to avoid using GitHub Actions as a debugger; maintain the exact local Node/Postgres/Redis verification transcript and artifacts for each checkpoint, then mark the PR ready only after all acceptance criteria and full CI pass. Do not publish v2.5.0 or merge this draft until the user explicitly approves the release.
+
+Rollback runbook: freeze writes, take a PostgreSQL and object-store snapshot, confirm migrations are additive and backward-compatible, migrate the staging clone first, compare authenticated health, file writes/reads and folder/listing APIs, then promote the precise verified commit. If acceptance fails, revert the application to the previous known-good SHA while leaving compatible additive columns in place; restore DB/object backups only if an incompatible data conversion occurred. A reverse migration must never delete data generated under the newer code without an independently validated export.
+
+### Reproducible transfer and database benchmark (draft #58)
+
+`npm run benchmark` still runs the original health-inject microbenchmark for backward comparison. `npm run benchmark:transfers` exercises **real loopback HTTP** multipart one-shot uploads, resumable session initiation, part PUT/completion, authenticated cursor file listings, download-token creation, ranged GET and file deletion, with real PostgreSQL quota/session/audit operations and the configured Redis coordination. The workload uses **1, 4, 16 and 32** concurrent transfer clients for both one-shot and resumable flows, 256 KiB objects divided into 64 KiB parts by default. It creates isolated test users and data, and purges generated users/bytes on completion. It fails on any HTTP/transfer/DB error, timeout, bad range response, or exceeded memory budget. Do not run this against production or an externally reachable host.
+
+Environment: Node 24.22.2, a disposable PostgreSQL database and Redis. Example:
+
+```bash
+export NODE_ENV=test
+export DATABASE_URL=postgresql://benchmark:benchmark@127.0.0.1:5432/benchmark
+export REDIS_URL=redis://127.0.0.1:6379
+export JWT_SECRET=ci-only-secret-that-is-long-enough-for-tests
+npm ci
+npx prisma generate && npx prisma migrate deploy
+npm run benchmark:transfers > transfer-benchmark.json
+# Extended local/scheduled profile; keep file sizes within configured upload limit:
+BENCHMARK_FILE_BYTES=1048576 BENCHMARK_CHUNK_BYTES=65536 \
+  BENCHMARK_MAX_RSS_MB=1024 npm run benchmark:transfers
+```
+
+The JSON records per-stage throughput (requests/sec and MiB/sec), p50/p95/p99 latency, errors, peak RSS, process CPU time and SQL query counts. PostgreSQL queries are *counted* using an explicit benchmark-only Prisma event hook; query text and parameters are **not logged**. The isolated performance build opts out of the **coarse 240/IP global rate cap** to measure infrastructure, while route-specific security throttles and production defaults remain in place. Production limits remain intact. Hashing and transfers are expected to take **O(file size)** time; bounded parts prevent unbounded buffering.
+
+Benchmark thresholds are **failure=0 and peak RSS <= 1024 MiB** by default, with 20-second per-request timeout; hard microsecond latency limits are intentionally avoided due to machine/runner variance. Preserve the JSON artifact for before/after measurements, identify VM CPU, allocated memory, Node and PostgreSQL/Redis versions, and compare warmed-loopback results only with the *same* environment. Longer file/transfer stress tests should run separately; these results do not represent Render cold starts, internet latency, or production S3 throughput. If the 32-client or memory gate fails, do not publish the release.
+
+
+### Indexed leased upload cleanup workers (draft #59)
+
+The upload cleanup sweep uses an atomic PostgreSQL `UPDATE ... FROM (SELECT ... ORDER BY ... LIMIT ... FOR UPDATE SKIP LOCKED)` claim, with a per-run random fencing token and lease-expiry timestamp. Claims are committed **before** storage I/O; the session's established **User → UploadSession** lock protocol still guards quota release and stale completion recovery. This prevents two replicas deleting the same session's chunks concurrently, without holding a row lock during a potentially slow S3 operation. Expired `UPLOADING` and truly stale `COMPLETING` sessions retain the existing fenced semantics; healthy completers must never be reclaimed. Terminal-session bytes are removed separately after a one-minute grace period, and `chunksCleanedAt` marks physical cleanup completion. Terminal metadata cannot be pruned by the #57 retention worker until this flag is set, preventing loss of orphan-cleanup evidence.
+
+Configuration (environment variables): `VAULTBOX_UPLOAD_CLEANUP_BATCH_SIZE=100` (1–250), `VAULTBOX_UPLOAD_CLEANUP_CONCURRENCY=4` (1–16), `VAULTBOX_UPLOAD_CLEANUP_LEASE_SECONDS=120` (30–600), `VAULTBOX_UPLOAD_CLEANUP_DELETE_TIMEOUT_MS=30000` (1,000–120,000). Each five-minute sweep claims at most two ordered bounded batches (expired and terminal) and includes retries for expired one-shot reservations and idempotency keys. Storage failures are recorded with only a generic category (no token, file path or provider secrets), attempted jobs are delayed exponentially (10 seconds to one hour), and crashed claims become claimable after the lease. Leases and per-job retry state are in the shared database, not Redis or process memory.
+
+`getUploadCleanupStats()` exposes only aggregate counters: expired, recovered, terminal, failures, retries, retry backlog, pending/terminal backlog, oldest due timestamps and elapsed milliseconds. Alert if `failures` persists, if the oldest due job/terminal backlog increases for three sweeps, if the retry age is over an hour, or if worker duration approaches its five-minute schedule. No tenant identifier should appear in metrics/logs. During rollout monitor disk usage and object-store deletion errors; a failing storage adapter cannot be treated as a successful cleanup. On S3 the adapter's idempotent deletes and per-session prefixes make late completions safe to retry.
+
+Verification: `node --test test/upload-cleanup-worker.integration.test.js` checks two independent Prisma clients, one-time claims, delayed failures, crash lease reclaim and quota release exactly once. An explicit stress gate `VAULTBOX_RUN_LARGE_CLEANUP_TEST=true node --test test/upload-cleanup-worker.integration.test.js` seeds 10,000 old terminal sessions and drains them with two workers and batch/concurrency bounds. The large stress fixture is opt-in to control recurring CI costs. The additive migration `20261111010000_upload_cleanup_claims` must be applied before starting the worker; validate EXPLAIN on the candidate-claim indexes on a representative production-like dataset. The application is not automatically switched to a separate cron worker: scheduled app instances may run simultaneously safely. Before scaling beyond two replicas, select a separately scheduled cleanup process and disable redundant timers in web processes.
+
+Rollback: retain additive schema columns; stop the new cleanup scheduler if storage retry behavior regresses, preserve all uncleaned terminal metadata and object backups, and roll back application binaries. Do not drop the cleanup lease/cleaned columns while a worker might still hold a claim. Retain the outbox and its data until cleanup has been verified; a previous app version that ignores cleaned flags must not be allowed to prematurely prune outstanding physical-delete records.
+
+
+#### Measured terminal-claim index improvement (local benchmark)
+
+On Node 24.22.2/PostgreSQL 18.6 with 10,000 stale terminal sessions, `EXPLAIN (ANALYZE, BUFFERS)` showed the pre-index terminal claim using **Limit → LockRows → Sort → Seq Scan**, executing in **12.276 ms** for 250 rows. Adding the narrow partial index `UploadSession_cleanup_terminal_due_idx` changed the plan to **Limit → LockRows → Index Scan**, **0.681 ms** for 250 rows under the same synthetic fixture (approximately 18× faster for this one measured SQL query). Two workers drained all 10,000 sessions in **7.48 seconds / 20 paired sweeps**, with no duplicate deletion or quota release. Before adding the index, the same local stress took **8.79 seconds**, but the end-to-end comparison is subject to VM caching and scheduling variance. The partial index measured **1,351,680 bytes** after the stress run; it adds writes when terminal sessions are created/cleaned and should be reevaluated against Neon staging index bloat and production write rates. The broad `cleanupLeaseUntil` index was ~5.2 MB on this exercised test database, including historical dead tuples; that is not a production storage estimate. These are diagnostic local figures, not production SLAs.
+
+The partial index is an additive SQL-only Prisma migration `20261111011000_upload_cleanup_terminal_index`. Its predicate covers only uncleaned terminal upload sessions, so it cannot turn active upload writes into unbounded index churn. If production plans regress, operators may drop only this optional index using a separately approved concurrent index rollback while retaining the cleanup lease columns and durable cleanup state; do not delete any session metadata as part of index rollback.
+
+## v2.5.0 migration/review operations (not yet performed in production)
+
+- The additive stored-name index `20261112003000_file_stored_name_idx` is created with `CREATE INDEX CONCURRENTLY` and must run outside a PostgreSQL transaction block. On staging, verify the real plan uses `File_storedName_idx` for orphan/legacy lookups before the Render cutover.
+- **Recovery if the concurrent index build fails:** PostgreSQL can leave a named but **invalid** index after an interrupted `CREATE INDEX CONCURRENTLY`. `IF NOT EXISTS` alone will skip that invalid index on retry, and PostgreSQL will still incur write overhead maintaining it. Stop release rollout and check the exact state using:
+  ```sql
+  SELECT c.relname, i.indisready, i.indisvalid
+  FROM pg_class AS c
+  JOIN pg_index AS i ON i.indexrelid = c.oid
+  WHERE c.oid = to_regclass('public."File_storedName_idx"');
+  ```
+  If `indisvalid = false`, execute **outside a transaction** (with operator approval and against the correct staging/production database):
+  ```sql
+  DROP INDEX CONCURRENTLY IF EXISTS "File_storedName_idx";
+  ```
+  If Prisma recorded migration `20261112003000_file_stored_name_idx` as failed, clear that failed migration **after** examining its error: `npx prisma migrate resolve --rolled-back 20261112003000_file_stored_name_idx`. Then rerun `npx prisma migrate deploy` and verify `indisvalid = true`. Never drop a valid index, and never mark a failed migration `--applied` just to bypass the build. Document the observed DB state and rerun outcome before promotion.
+- Earlier as-yet-unreleased migrations `20261110100000_folder_aware_uploads` and `20261110110000_metadata_retention` contain ordinary index builds. **Schedule the migration stage in a low-traffic maintenance window** and monitor write locks; do not run them during high-volume uploads. Do not rewrite already applied migration checksums. Re-evaluate using standalone concurrent-index migrations if staging reveals unacceptable lock duration.
+- `DownloadToken_expiresAt_id_idx` may overlap an existing single-column `expiresAt` index; measure index size, write cost and query plans before removing any old index (not in this release).
+- A completed CodeQL workflow is **not** proof that no code-scanning alerts remain. Require manual inspection of open CodeQL alerts and CodeRabbit review threads; establish a repository code-scanning branch-protection/ruleset policy in GitHub Settings before approval. The connector cannot currently enforce that repository setting.
+- ESLint 9.39.5 is pinned while the installed newer v10 tree had moderate npm advisories. Do not upgrade solely to satisfy a deprecation warning until an audited, clean version is available; `npm audit --audit-level=moderate` remains a blocking CI gate.
+- `npm run benchmark:queries` refuses `NODE_ENV=production` and requires `VAULTBOX_QUERY_PROFILE_ALLOW_WRITES=1` on a disposable nonproduction database. Never set this variable in Render production.
+- Single-instance local storage is safe only with a verified persistent, separately backed-up filesystem. No production S3 provider is configured; all provider-specific assurance is UNVERIFIED.

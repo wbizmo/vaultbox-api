@@ -241,7 +241,7 @@ test("concurrent workers and duplicate sweeps remove each object exactly once", 
   f.storage.calls.clear();
   for (const file of files) await f.makeDue(file);
 
-  const outcomes = await Promise.all(Array.from({ length: 6 }, () => processFileDeletions(f.storage, { batchSize: 10 })));
+  const outcomes = await Promise.all(Array.from({ length: 6 }, () => processFileDeletions(f.storage, { batchSize: 10, userId: f.user.id })));
   assert.equal(outcomes.reduce((sum, o) => sum + o.claimed, 0), 24, "every row claimed by exactly one worker");
   for (const file of files) {
     assert.equal(f.storage.calls.get(file.storedName), 1, "one storage call per object");

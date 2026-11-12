@@ -2,18 +2,28 @@ name: VaultBox CI
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches:
       - main
-      - feat/vaultbox-v2-transfer-engine
 
 permissions:
   contents: read
+  security-events: write
+
+# Cancel superseded SHA runs within the same event type. Draft synchronize
+# events must never cancel an independently launched ready_for_review run.
+concurrency:
+  group: vaultbox-ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event.action || 'push' }}
+  cancel-in-progress: true
 
 jobs:
   verify:
+    # Review-ready PRs and all main pushes run the exact same verification.
+    # Draft checkpoints remain locally verified to limit wasted Actions minutes.
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:16-alpine
@@ -59,23 +69,45 @@ jobs:
           echo "node ${actual} (expected ${expected}); npm $(npm --version)"
           test "$actual" = "$expected"
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Initialize CodeQL extended security analysis
+        uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript
+          build-mode: none
+          queries: security-extended
+
+      - name: Install locked dependencies
+        run: npm ci --no-fund --no-audit
 
       - name: Dependency security gate
         run: |
           set +e
-          npm audit --audit-level=high --json > dependency-audit.json
+          npm audit --audit-level=moderate --json > dependency-audit.json
           status=$?
           set -e
           cat dependency-audit.json
           exit $status
 
-      - name: Generate Prisma client
-        run: npx prisma generate
+      - name: Benchmark harness and historical runner regressions
+        run: node --test test/benchmark-capabilities.test.js test/benchmark-history.test.js
 
-      - name: Apply database migrations
-        run: npx prisma migrate deploy
+      - name: Render Free install/startup compatibility regressions
+        run: node --test test/render-free-compatibility.test.js
+
+      - name: Validate Prisma schema
+        run: npx prisma validate
+
+      - name: Generate Prisma client
+        run: npm run deploy:generate
+
+      - name: Apply committed migrations on isolated CI Postgres 16
+        run: npm run deploy:migrate
+
+      - name: Typecheck generated Prisma contracts and checked JavaScript
+        run: npm run typecheck
+
+      - name: Build deployable Node API (Prisma runtime and module smoke)
+        run: npm run build | tee build-verification.log
 
       - name: Syntax check
         run: find src scripts test prisma -name '*.js' -print0 | xargs -0 -n1 node --check
@@ -83,11 +115,80 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Unit and integration tests
-        run: npm test
+      - name: Static credential and secret security scan
+        run: npm run security:scan
+
+      - name: Full unit, integration, BOLA, crash and multipart fault suite
+        run: |
+          set -euo pipefail
+          # Remove potentially sensitive raw logs even when redaction fails.
+          trap 'rm -f test-output.raw.log' EXIT
+          set +e
+          npm test -- --experimental-test-coverage > test-output.raw.log 2>&1
+          code=$?
+          set -e
+          node scripts/redact-test-artifacts.js test-output.raw.log test-output.redacted.log
+          cat test-output.redacted.log
+          exit "$code"
+
+      - name: Explicit independent-process and malformed multipart regression gate
+        run: |
+          node --test test/distributed-fault-gates.integration.test.js
+          # Both files use process-external PostgreSQL temporary-claim counters.
+          # The repository's normal npm test gate runs one test file at a time;
+          # match that isolation here to avoid cross-file budget interference.
+          node --test --test-concurrency=1 test/temporary-storage.integration.test.js test/multipart-fuzz.integration.test.js
+
+      - name: Ten-thousand-session cleanup backlog and two-worker gate
+        env:
+          VAULTBOX_RUN_LARGE_CLEANUP_TEST: "true"
+        run: node --test test/upload-cleanup-worker.integration.test.js
 
       - name: Benchmark
-        run: npm run benchmark | tee benchmark.json
+        run: |
+          set -euo pipefail
+          npm run benchmark | tee benchmark.json
+
+      - name: Real HTTP transfer and database benchmark
+        run: |
+          set -euo pipefail
+          npm run benchmark:transfers | tee transfer-benchmark.json
+
+      - name: PostgreSQL query plans and optional count benchmark
+        env:
+          VAULTBOX_QUERY_PROFILE_ALLOW_WRITES: "1"
+        run: |
+          set -euo pipefail
+          npm run benchmark:queries | tee query-benchmark.json
+
+      - name: Cross-release capability API benchmarks (current v2.5 implementation)
+        env:
+          VAULTBOX_BENCHMARK_ALLOW_WRITES: "1"
+        run: |
+          set -euo pipefail
+          npm run benchmark:capabilities | tee capability-benchmark.json
+
+      - name: Simulate exact Render Free production-only install and migration bootstrap
+        env:
+          RENDER: "true"
+          RENDER_SERVICE_TYPE: "web"
+          VAULTBOX_RENDER_FREE_MODE: "1"
+          NODE_ENV: production
+        run: |
+          set -euo pipefail
+          # Render's existing build command uses npm install --omit=dev.
+          # Keep npm-shrinkwrap.json; it pins Prisma and all dependencies.
+          rm -rf node_modules package-lock.json
+          npm install --omit=dev --no-audit --no-fund
+          # postinstall must generate and verify Prisma even without TypeScript.
+          npm_config_offline=true node scripts/verify-build.js
+          # Free-plan startup migration must work from installed Prisma,
+          # without fetching an executable or bypassing deployment migration locks.
+          npm_config_offline=true node scripts/render-startup.js
+
+      # CodeQL security-extended runs on this same runner, not a second job.
+      - name: Analyze CodeQL findings
+        uses: github/codeql-action/analyze@v4
 
       - name: Upload engineering evidence
         if: always()
@@ -96,5 +197,10 @@ jobs:
           name: vaultbox-engineering-evidence
           path: |
             benchmark.json
+            transfer-benchmark.json
+            query-benchmark.json
+            capability-benchmark.json
             dependency-audit.json
+            test-output.redacted.log
+            build-verification.log
           retention-days: 30
