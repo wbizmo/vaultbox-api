@@ -103,16 +103,18 @@ Real source/artifact: [historical CI run #43137602142](https://github.com/wbizmo
 
 | Real source checkout | Node | `GET /health` req/s | Health p95 | `GET /plans` req/s | Plans p95 |
 | --- | --- | ---: | ---: | ---: | ---: |
-| v1.0.0 | v20.19.5 | **Not measured** | — | **Not measured** | — |
+| v1.0.0 | v20.19.5 | 8,445.032 | 4.836 ms | 2,878.968 | 17.540 ms |
 | v2.0.0 | v24.19.0 | 12,345.769 | 2.996 ms | 3,377.955 | 12.582 ms |
 | v2.1.0 | v24.19.0 | 14,642.427 | 2.532 ms | 3,349.248 | 15.136 ms |
 | v2.1.1 | v24.22.2 | 15,599.249 | 2.205 ms | 5,209.838 | 7.862 ms |
 | v2.2.0 | v24.22.2 | 12,226.121 | 2.796 ms | 3,734.203 | 11.071 ms |
 | v2.5.0 candidate | v24.22.2 | 15,930.139 | 2.206 ms | 4,225.974 | 10.429 ms |
 
-`GET /` was also benchmarked with the same concurrency and sample size: v2.0.0 18,976.531 req/s; v2.1.0 20,169.472; v2.1.1 15,154.505; v2.2.0 15,695.820; v2.5.0 candidate 14,992.182.
+`GET /` was also benchmarked with the same concurrency and sample size: v1.0.0 8,071.642 req/s; v2.0.0 18,976.531 req/s; v2.1.0 20,169.472; v2.1.1 15,154.505; v2.2.0 15,695.820; v2.5.0 candidate 14,992.182.
 
-**Do not interpret differences as guaranteed acceleration or regression.** The samples are short (100 requests/profile), each tag uses its original Node patch, GitHub runners have variable CPU contention, and these are in-process `Fastify.inject` calls with a disposable DB, not the public Render network. v1.0.0 initially failed **before testing** because its Node 20/npm 10 installation produced `npm error Exit handler never called!`; no v1 measurement was fabricated. The separate legacy-install rerun is tracked in the historical workflow.
+**v1.0.0 restored:** [isolated retry #43138654183](https://github.com/wbizmo/vaultbox-api/actions/runs/43138654183) passed all 12 profiles with zero errors, including v1.0.0 using pinned Node 20.19.5. Its archived npm lockfile contained 164 URLs to a retired private Replit mirror. The test-only checkout rewrites the mirror host to the public npm registry after asserting every dependency version and Subresource Integrity hash is unchanged. The original tag was **not modified**. v1 retains verbose application request logging in its benchmark artifact, which adds overhead relative to newer releases.
+
+**Do not interpret differences as guaranteed acceleration or regression.** The samples are short (100 requests/profile), each tag uses its original Node patch, GitHub runners have variable CPU contention, and these are in-process `Fastify.inject` calls with a disposable DB, not the public Render network. v1.0.0's initial install failed due to the retired Replit mirror, and its successful rerun above retains the archived versions and hashes. The corrected results supersede the initial not-measured status.
 
 ## Not measured / not accepted
 

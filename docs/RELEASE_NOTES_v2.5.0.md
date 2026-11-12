@@ -33,7 +33,7 @@ The review corrective batch addresses temporary ASSEMBLY concurrency-slot deadlo
 
 ## Performance evidence
 
-The exact PR-head CI benchmark results (Node 24.22.2, PostgreSQL 16.15, Redis 7, local storage) include **26,711.43 in-process health requests/s** with **0 errors**, **37.704 MiB/s one-shot uploads at concurrency 32**, and **8,000-file count-free pagination p50 0.225 ms**, compared with 1.182 ms when obtaining the exact count. See [complete scores, p95/p99, raw artifact and replication commands](./BENCHMARKS_v2.5.0.md). These are **not** public production benchmarks.
+The exact PR-head CI benchmark results (Node 24.22.2, PostgreSQL 16.15, Redis 7, local storage) include **26,711.43 in-process health requests/s** with **0 errors**, **37.704 MiB/s one-shot uploads at concurrency 32**, and **8,000-file count-free pagination p50 0.225 ms**, compared with 1.182 ms when obtaining the exact count. See [complete scores, p95/p99, raw artifact and replication commands](./BENCHMARKS_v2.5.0.md). These are **not** public production benchmarks. Actual historical v1.0.0–v2.2.0 checkout scores (health/system/plans), including the restored legacy v1 runner, and current v2.5.0 capability measurements are documented with reproducible evidence in the [full benchmark report](./BENCHMARKS_v2.5.0.md).
 
 ## Release verification evidence and operator acceptance
 

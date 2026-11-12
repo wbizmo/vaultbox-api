@@ -316,7 +316,7 @@ On [GitHub CI run #43130804149](https://github.com/wbizmo/vaultbox-api/actions/r
 | PostgreSQL 8,000-file page, with exact total | **1.182 ms p50** |
 | PostgreSQL 8,000-file page, `includeTotal=false` | **0.225 ms p50** |
 
-These are **synthetic CI fixture scores**, not live Render throughput or evidence of production durability. All 8 HTTP transfer profiles reported 0 failures. For historical v2.0–v2.5 tagged-code benchmark scores, the full 1/4/16/32-client tables, the cross-release capability API matrix (scores on current v2.5.0 code only), runner variables, raw artifact, exact reproduction instructions, and interpretation caveats, see **[Benchmark report and reproduction guide](./docs/BENCHMARKS_v2.5.0.md)**. Historical performance claims must identify the commit and environment; rerun on the final main SHA to publish a final release baseline.
+These are **synthetic CI fixture scores**, not live Render throughput or evidence of production durability. All 8 HTTP transfer profiles reported 0 failures. For historical v1.0–v2.5 tagged-code benchmark scores, the full 1/4/16/32-client tables, the cross-release capability API matrix (scores on current v2.5.0 code only), runner variables, raw artifact, exact reproduction instructions, and interpretation caveats, see **[Benchmark report and reproduction guide](./docs/BENCHMARKS_v2.5.0.md)**. Historical performance claims must identify the commit and environment; rerun on the final main SHA to publish a final release baseline.
 
 ## Render Free deployment and limitations
 
