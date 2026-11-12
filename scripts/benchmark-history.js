@@ -13,8 +13,8 @@ function percentile(samples,q) {
 }
 function round(num) { return Math.round(num*1000)/1000; }
 function sampleCount(env=process.env) {
-  const n=Number(env.BENCH_HIST_REQUESTS || 500);
-  if(!Number.isSafeInteger(n)||n<100||n>20000) throw new Error("BENCH_HIST_REQUESTS must be 100..20000");
+  const n=Number(env.BENCH_HIST_REQUESTS || 100);
+  if(!Number.isSafeInteger(n)||n<32||n>100) throw new Error("BENCH_HIST_REQUESTS must be 32..100 to respect v1 rate limits");
   return n;
 }
 async function stage(app,route,requests,concurrency) {
@@ -61,18 +61,24 @@ async function main() {
   const root=process.cwd();
   const packageInfo=require(path.join(root,"package.json"));
   const buildApp=require(path.join(root,"src","app.js"));
-  const app=buildApp({logger:false});
-  try {
-    await app.ready();
-    // Warm all routes equally to exclude first-call registration.
-    for(let i=0;i<100;i++)await app.inject({method:"GET",url:"/health"});
-    const cases=[];
-    for(const route of ["/health","/","/plans"]) {
-      const preflight=await app.inject({method:"GET",url:route});
-      if(preflight.statusCode!==200)throw new Error("preflight "+route+" returned "+preflight.statusCode);
-      for(const concurrency of [1,4,16,32])
+  const cases=[];
+  // Historical v1 limits each IP to 120 calls/min, and v2 defaults to 240.
+  // Give EACH measured scenario a fresh application instance with a new
+  // in-memory rate-limit window; stay below v1's documented cap per instance.
+  // The app initialization is outside the timed request batch.
+  for(const route of ["/health","/","/plans"]) {
+    for(const concurrency of [1,4,16,32]){
+      const app=buildApp({logger:false,rateLimitMax:10000});
+      try {
+        await app.ready();
+        for(let i=0;i<5;i++) {
+          const warm=await app.inject({method:"GET",url:route});
+          if(warm.statusCode!==200)throw new Error("warmup "+route+" returned "+warm.statusCode);
+        }
         cases.push(await stage(app,route,requests,concurrency));
+      } finally { await app.close(); }
     }
+  }
     console.log(JSON.stringify({
       benchmark:"historical-version-health-and-public-api",
       releaseTag:process.env.RELEASE_TAG,packageVersion:packageInfo.version,
@@ -84,7 +90,6 @@ async function main() {
       caveat:"Health/root/plan endpoints only; per-tag Node versions and dependencies differ; CI hardware is shared and noisy. Not public Render throughput or complete historical feature coverage.",
       cases
     },null,2));
-  } finally { await app.close(); }
 }
 if(require.main===module)main().catch(e=>{
   console.error("Historical benchmark failed:",e.message);

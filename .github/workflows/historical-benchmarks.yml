@@ -47,7 +47,7 @@ jobs:
       REDIS_URL: redis://127.0.0.1:6379
       JWT_SECRET: benchmark-history-only-secret-long-enough
       RELEASE_TAG: ${{ matrix.release }}
-      BENCH_HIST_REQUESTS: "500"
+      BENCH_HIST_REQUESTS: "100"
     steps:
       - name: Checkout exact historical release
         uses: actions/checkout@v6

@@ -8,8 +8,8 @@ test("history p50 and p95 are correctly ranked",()=>{
  assert.throws(()=>percentile([],0.5),/invalid samples/);
 });
 test("history requests have strict, bounded reproducibility limits",()=>{
- assert.equal(sampleCount({}),500);
- assert.throws(()=>sampleCount({BENCH_HIST_REQUESTS:"999999999"}),/100..20000/);
+ assert.equal(sampleCount({}),100);
+ assert.throws(()=>sampleCount({BENCH_HIST_REQUESTS:"999999999"}),/32..100/);
 });
 test("history runner records errors as hard failures",async()=>{
  const app={inject:async()=>({statusCode:429})};
