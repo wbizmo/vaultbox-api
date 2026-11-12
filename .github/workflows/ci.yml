@@ -88,6 +88,9 @@ jobs:
           cat dependency-audit.json
           exit $status
 
+      - name: Benchmark harness and historical runner regressions
+        run: node --test test/benchmark-capabilities.test.js test/benchmark-history.test.js
+
       - name: Render Free install/startup compatibility regressions
         run: node --test test/render-free-compatibility.test.js
 

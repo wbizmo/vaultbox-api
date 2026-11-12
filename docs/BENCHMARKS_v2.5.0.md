@@ -89,6 +89,14 @@ VAULTBOX_BENCHMARK_ALLOW_WRITES=1 BENCH_API_REQUESTS=100 npm run benchmark:capab
 
 For historical apples-to-apples performance comparison, use a **separate disposable PostgreSQL database and isolated checkout per tag** (v1.0.0, v2.0.0, v2.1.0, v2.1.1, v2.2.0 and v2.5.0), apply that tag's own migrations, pin its supported Node/npm and run only benchmark scenarios that that version actually supports. Keep non-reusable storage fixtures and test identities isolated; older releases do not contain this new harness and require a compatibility-specific runner. **No historical cross-tag speedup percentage is asserted here.**
 
+## Actual historical tag-to-tag comparison
+
+A separate **isolated GitHub Actions matrix** now checks out each *published* release tag `v1.0.0`, `v2.0.0`, `v2.1.0`, `v2.1.1`, `v2.2.0`, plus the current v2.5.0 release candidate in its own runner, pins the **Node version from that tag's own `.node-version` file**, installs that tag's dependencies and migrations against **fresh per-job PostgreSQL 16 / Redis 7**, and runs the **same external `scripts/benchmark-history.js` harness**. It measures `GET /health`, `GET /`, `GET /plans` at concurrency 1/4/16/32 with **500 requests per scenario**, recording throughput, p50/p95/p99, CPU/RSS and all errors. The evidence is retained as six separate version-labelled Actions artifacts.
+
+This avoids the invalid shortcut of using current code and calling it a v1/v2 baseline. Still, **the historical benchmarks are comparisons of common public endpoints only**, not full feature-comparability claims: API versions, dependencies, Node runtimes and scheduling noise vary. Treat results as a historical trend, not a controlled hardware-to-hardware regression proof. Old releases with dependency or migration incompatibilities must be reported as **failed/not measured**, not silently skipped. The current v2.5.0 API capability matrix above covers feature-specific performance beyond these shared historical routes.
+
+Workflow: [Historical Benchmarks](../.github/workflows/historical-benchmarks.yml). The automatic one-time candidate branch run triggers when the workflow file is added; future reruns can use the manual workflow dispatch after merge. Once CI finishes, insert the actual verified per-version numbers and run links here. **Do not fabricate scores while a job is pending**.
+
 ## Not measured / not accepted
 
 No production Render/Neon/Upstash latency or uptime benchmark, no real production S3 provider, no persistent-disk recovery proof, no long-running SLA baseline, and no cross-host durability test. Those require separately authorized production observability, a safe staging clone and storage acceptance. The S3 provider acceptance remains **UNVERIFIED by owner direction**, not passed.

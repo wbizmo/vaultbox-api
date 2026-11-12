@@ -295,6 +295,7 @@ npm run benchmark
 npm run benchmark:transfers
 npm run benchmark:queries
 VAULTBOX_BENCHMARK_ALLOW_WRITES=1 npm run benchmark:capabilities  # disposable DB only
+# Historical tag runs are isolated in .github/workflows/historical-benchmarks.yml
 npm audit --audit-level=moderate
 ```
 
