@@ -13,15 +13,13 @@ permissions:
 
 jobs:
   history:
-    # The initial matrix already produced five verified tagged artifacts.
-    # Subsequent branch pushes retry only v1's legacy npm-install failure.
-    # Manual dispatches remain available to rerun all six profiles.
-    if: github.event_name == 'workflow_dispatch' || matrix.release == 'v1.0.0'
+    # Subsequent branch pushes only retry v1's legacy npm install.
+    # Manual dispatches select the complete published-tag matrix.
     name: Benchmark ${{ matrix.release }}
     strategy:
       fail-fast: false
       matrix:
-        release: [v1.0.0, v2.0.0, v2.1.0, v2.1.1, v2.2.0, candidate]
+        release: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["v1.0.0","v2.0.0","v2.1.0","v2.1.1","v2.2.0","candidate"]' || '["v1.0.0"]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
