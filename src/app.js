@@ -122,7 +122,24 @@ function buildApp(options = {}) {
     }
   });
 
-  app.register(swaggerUi, { routePrefix: "/docs" });
+  app.register(swaggerUi, {
+    routePrefix: "/docs",
+    uiHooks: {
+      onRequest: async (request, reply) => {
+        // @fastify/swagger-ui 6.1.1 builds its relative ./json URL from
+        // window.location.href, including any query string on the docs page.
+        // Canonicalize *only* the UI index: /docs/json, /docs/yaml and static
+        // assets remain accessible unchanged, including with query strings.
+        const rawUrl = request.raw.url || "";
+        const queryIndex = rawUrl.indexOf("?");
+        if (queryIndex === -1) return;
+        const pathname = rawUrl.slice(0, queryIndex);
+        if (pathname === "/docs" || pathname === "/docs/") {
+          return reply.redirect("/docs/");
+        }
+      }
+    }
+  });
 
   installRequestMetrics(app);
   installSecurityHeaders(app);
