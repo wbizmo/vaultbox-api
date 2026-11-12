@@ -1,6 +1,6 @@
 # VaultBox v2.5.0
 
-**Status:** DRAFT RELEASE NOTES — engineering implementation in review in PR #88. No release tag has been published and production has not been switched to this version.
+**Status:** v2.5.0 release candidate. Release publication and production activation must be verified independently; a versioned source tree does not establish that production runs this version. v2.3.0 and v2.4.0 were engineering groupings and were not separately tagged.
 
 ## Cumulative changes since v2.2.0
 
@@ -27,7 +27,11 @@ The review corrective batch addresses temporary ASSEMBLY concurrency-slot deadlo
 
 **No production S3 provider is configured or planned for this review.** The optional S3 adapter was tested only against a disposable emulator; production IAM, checksum migration/cutover, S3 multipart concurrency guarantees and real multi-host durability remain **UNVERIFIED**. Continue single-instance local storage only with a genuinely persistent, separately backed-up volume; Render's ephemeral disk must never be described as durable object storage. This is a deliberate review-scope exception, not a completed #53 provider acceptance.
 
-## Release gates (not yet signed off)
+## Performance evidence
+
+The exact PR-head CI benchmark results (Node 24.22.2, PostgreSQL 16.15, Redis 7, local storage) include **26,711.43 in-process health requests/s** with **0 errors**, **37.704 MiB/s one-shot uploads at concurrency 32**, and **8,000-file count-free pagination p50 0.225 ms**, compared with 1.182 ms when obtaining the exact count. See [complete scores, p95/p99, raw artifact and replication commands](./BENCHMARKS_v2.5.0.md). These are **not** public production benchmarks.
+
+## Release gates (must be independently evidenced)
 
 - Verify complete local Node 24.22.2, PostgreSQL 16, Redis 7, lint, audit, integration, fault, performance and rollback/forward compatibility evidence on the exact final commit.
 - Run CodeQL v4 security-extended analysis on the exact reviewed commit; this is configured in the existing single CI verify runner and skipped while the PR is draft (CodeQL cannot be accurately claimed as locally executed). Complete CodeRabbit/human review and reconcile every linked issue's acceptance criteria except the explicitly documented provider exception.
@@ -40,3 +44,7 @@ The review corrective batch addresses temporary ASSEMBLY concurrency-slot deadlo
 The consolidated PR workflow on its exact head runs Node 24.22.2, PostgreSQL 16, Redis 7, locked npm ci, moderate-severity-or-higher npm dependency audit, Prisma schema validation and migrations, strict TypeScript checking of generated data-model contracts plus checked security JavaScript, a real Prisma/runtime module build smoke, ESLint, syntax checking, static secret scanning, the full integration suite with coverage, explicit independent-process/BOLA/failure corpus, 10k-session cleanup stress, three benchmark suites and CodeQL security-extended. One runner handles verification and CodeQL; redundant SHA runs are cancelled. The final green CI run, review threads and any operational exceptions must be inspected before merge approval.
 
 Main currently runs the prior version's CI until this review PR is merged. Do not push a standalone version/CI update to main merely to obtain a green check: Render currently auto-deploys main, and pushing would risk an unapproved production deployment. The full CI workflow is committed in this PR and will replace the old main workflow as part of the reviewed merge. CodeRabbit and human reviewers should review the full consolidated diff, not just the latest commit.
+
+## Historical version notes
+
+[v1.0.0](./RELEASE_NOTES_v1.0.0.md) · [v2.0.0](./RELEASE_NOTES_v2.0.0.md) · [v2.1.0](./RELEASE_NOTES_v2.1.0.md) · [v2.1.1](./RELEASE_NOTES_v2.1.1.md) · [v2.2.0](./RELEASE_NOTES_v2.2.0.md) · [v2.3 grouping](./RELEASE_NOTES_v2.3.0.md) · [v2.4 grouping](./RELEASE_NOTES_v2.4.0.md). All original core APIs remain, subject to documented security and operational compatibility changes.

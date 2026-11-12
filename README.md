@@ -1,10 +1,10 @@
 # VaultBox API
 
-VaultBox is a secure cloud-storage API built with Fastify, Prisma, Neon PostgreSQL, Upstash Redis, and Render. **v2.1.x** added durable resumable chunked uploads and an efficiency pass across transfer I/O, quota accounting, database access, Redis coordination, pagination, search, and deployment safety; **v2.2.0** hardens authorization, upload concurrency, rate limiting, auditing, password verification and download-token handling.
+VaultBox is a secure cloud-storage API built with Fastify, Prisma, PostgreSQL, Redis, and a storage-adapter boundary. The **v2.5.0 source release candidate** consolidates the v2.3 reliability, v2.4 performance/security and v2.5 API improvements while retaining the v1–v2.2 features.
 
-- Current release: **v2.2.0 — Authorization, Concurrency and Abuse-Resistance Release** (builds on v2.1.1, the Node.js security maintenance release)
+- Source version: **v2.5.0**. Published releases and tags: [GitHub Releases](https://github.com/wbizmo/vaultbox-api/releases). Verify production's deployed commit independently; the package version does not prove deployment.
 - Changelog: [`CHANGELOG.md`](./CHANGELOG.md)
-- Release notes: [`docs/RELEASE_NOTES_v2.2.0.md`](./docs/RELEASE_NOTES_v2.2.0.md) · [`v2.1.1`](./docs/RELEASE_NOTES_v2.1.1.md) · [`v2.1.0`](./docs/RELEASE_NOTES_v2.1.0.md)
+- Versioned release notes: [v1.0.0](./docs/RELEASE_NOTES_v1.0.0.md) · [v2.0.0](./docs/RELEASE_NOTES_v2.0.0.md) · [v2.1.0](./docs/RELEASE_NOTES_v2.1.0.md) · [v2.1.1](./docs/RELEASE_NOTES_v2.1.1.md) · [v2.2.0](./docs/RELEASE_NOTES_v2.2.0.md) · [v2.3.0 grouping](./docs/RELEASE_NOTES_v2.3.0.md) · [v2.4.0 grouping](./docs/RELEASE_NOTES_v2.4.0.md) · [v2.5.0](./docs/RELEASE_NOTES_v2.5.0.md). **v2.3 and v2.4 were development groupings, not separately published releases.**
 - Upload protocol: [`docs/UPLOADS.md`](./docs/UPLOADS.md)
 - Engineering record: [`docs/V2_ENGINEERING_PLAN.md`](./docs/V2_ENGINEERING_PLAN.md)
 
@@ -16,6 +16,30 @@ VaultBox is a secure cloud-storage API built with Fastify, Prisma, Neon PostgreS
 - Dependency health: `https://vaultbox-api-ucff.onrender.com/infra/health`
 
 Render may cold-start an inactive free-tier service, so first-request latency on the public URL is not comparable to the in-process benchmark.
+
+## What VaultBox includes in v2.5.0
+
+These capabilities are cumulative. v2.5.0 **does not remove** the original account, storage, administration or download API.
+
+| Introduced | Capabilities retained in v2.5.0 |
+| --- | --- |
+| **v1.0.0 foundation** | Registration, login, JWT and role permissions; plans, subscriptions and quota; file upload/list/delete/checksums; folder CRUD; expiring download tokens; administrative users, suspension, audit logs, payment-failure simulation; health, metrics, Swagger/OpenAPI and Redis-based throttling. |
+| **v2.0.0** | Streaming checksums and quota-safe writes, HTTP HEAD/Range, 206/416, strong ETags, short-lived resumable download sessions, parallel-download client, robust Redis startup/health. |
+| **v2.1.0–v2.1.1** | Durable resumable chunked uploads with retries and part checksums; database indexing, cursor pagination, efficient quota admission and reduced Redis round trips; Node 24 security update. |
+| **v2.2.0** | Cross-tenant authorization tests; server-side paid-plan entitlements; immediate account/session revocation; upload leases, idempotency, hardened rate limits, audits and concurrency enforcement. |
+| **v2.3 functionality (included in 2.5)** | Durable file-deletion outbox, crash-safe temporary-byte controls and orphan reconciliation, stream abort/cleanup, expired transfer pruning, optional S3-compatible adapter and dry-run-only checksum migration tools. |
+| **v2.4 functionality (included in 2.5)** | Transfer/query performance profiles, 10k cleanup and fenced multireplica worker leases, compact upload-progress views, BOLA/fault/process test gates, optional count-free listing, exact-SHA/manual release gate and build-time Prisma generation. |
+| **v2.5.0 API** | Folder-aware upload and move APIs, root/folder file filtering, reservation-aware quota figures, stable tie-breaker for file pagination, clearer temporary-storage exhaustion responses (HTTP 507). |
+
+### New API options and backwards compatibility
+
+- **Folder-aware files:** `POST /files/upload` accepts optional `x-folder-id`; `POST /upload-sessions` accepts optional `folderId`. `PATCH /files/:id` with `{"folderId":"owned-folder-id"}` moves a file; `{"folderId":null}` moves it to root. `GET /files?folderId=<id>` selects a folder and `folderId=root` selects root. Folder deletion detaches contained files and pending uploads transactionally.
+- **Scalable progress:** `GET /upload-sessions/:id` still defaults to its legacy response; `view=summary` and `view=page&limit=100&afterPart=-1` are optional for up to 10,000 parts.
+- **Optional count-free paging:** `GET /files`, `GET /folders` and supported admin listings keep exact counts by default; clients may request `includeTotal=false`.
+- **Accurate remaining quota:** `GET /quota` retains legacy fields and adds reserved, committed, total-allocated and currently available bytes as BigInt-safe decimal strings.
+- **Operational changes:** overloaded temporary storage may return 507. v2.5.0 requires a build-generated Prisma client and a separate migration stage before startup; `npm start` no longer migrates.
+
+**Storage durability exception:** S3 code exists but **no real S3 provider is configured or verified**. Local single-instance storage must be backed by an actually persistent, backed-up volume; ephemeral Render filesystem is not durable user storage. S3/IAM/migration and multi-host guarantees are **UNVERIFIED**, not release acceptance. See [deployment guidance](./docs/DEPLOYMENT.md).
 
 ## Transfer engine
 
@@ -275,7 +299,22 @@ npm audit --audit-level=moderate
 
 The Node.js backend requires no JavaScript transpilation. The **real build** generates the Prisma client, performs strict TypeScript checking of the generated Prisma upload/quota/cleanup type contracts and checked JavaScript security and exact-SHA release-gate code, then validates that the runtime and all route modules load correctly. **The typecheck does not yet cover every JavaScript source file**; syntax validation, ESLint, security analysis and integration tests cover the remaining untyped JavaScript. Build and typecheck are not no-op commands. CI also checks PostgreSQL 16 migrations, Redis 7 coordination, distributed fault-injection, the 10,000-session cleanup backlog, real HTTP transfer tests, security-extended CodeQL and benchmark evidence. Superseded PR SHA runs are cancelled to reduce wasted runner minutes.
 
-`main` is still on the published v2.2.0 release until this PR is merged. The expanded CI workflow will automatically become the main-branch workflow when this PR merges; the reviewed exact main SHA must then pass the same gate.
+The main-branch workflow must pass again on the **exact final main SHA** after merge. PR validation alone cannot substitute for that release gate.
+
+## Measured engineering benchmarks (v2.5.0)
+
+On [GitHub CI run #43130804149](https://github.com/wbizmo/vaultbox-api/actions/runs/43130804149), commit `0c911c9`, with Node 24.22.2, PostgreSQL 16.15, Redis 7 and **local temporary storage**:
+
+| Measurement | CI result |
+| --- | ---: |
+| In-process Fastify `/health`, 5,000 requests / concurrency 32 | **26,711.43 req/s**, p50 0.941 ms, p95 2.332 ms, p99 9.319 ms, 0 errors |
+| One-shot uploads, 256 KiB each, concurrency 32 | **37.704 MiB/s**, p95 205.271 ms |
+| Resumable part PUTs, 64 KiB parts, concurrency 16 | **32.554 MiB/s**, p95 117.440 ms |
+| Ranged downloads, 4 KiB each, concurrency 32 | **4.892 MiB/s** (32-client resumable profile), p95 24.951 ms |
+| PostgreSQL 8,000-file page, with exact total | **1.182 ms p50** |
+| PostgreSQL 8,000-file page, `includeTotal=false` | **0.225 ms p50** |
+
+These are **synthetic CI fixture scores**, not live Render throughput or evidence of production durability. All 8 HTTP transfer profiles reported 0 failures. For the full 1/4/16/32-client tables, runner variables, raw artifact, exact reproduction instructions, and interpretation caveats, see **[Benchmark report and reproduction guide](./docs/BENCHMARKS_v2.5.0.md)**. Historical performance claims must identify the commit and environment; rerun on the final main SHA to publish a final release baseline.
 
 ## Production deployment
 
@@ -287,7 +326,7 @@ Approved migration/predeploy stage: npm run deploy:migrate
 Start: npm start (node src/server.js only)
 ```
 
-Update Render's build and deploy settings, verify persistent storage and rehearse migration rollback **before** merging. The PR's release/version update is not a production deployment. Do not rely on an application process to run migrations on every replica boot, and do not treat an ephemeral Render filesystem as durable user storage.
+Verify Render's build and deploy settings, persistent storage and rehearsed migration rollback **before** merging or deploying. The PR's release/version update is not a production deployment. Do not rely on an application process to run migrations on every replica boot, and do not treat an ephemeral Render filesystem as durable user storage.
 
 After each production deploy verify:
 
@@ -304,17 +343,3 @@ See [`CHANGELOG.md`](./CHANGELOG.md) and the versioned release notes in [`docs/`
 ## License
 
 MIT
-
-### Folder-aware files (v2.5.0 draft)
-
-One-shot uploads accept an optional `x-folder-id` header. Resumable session creation accepts an optional `folderId` field; completion commits to the latest valid folder or root. `PATCH /files/:id` with `{ "folderId": "owned-folder-id" }` moves a file, or `{ "folderId": null }` moves it to root without changing bytes or quota. `GET /files?folderId=<id>` filters to a folder and `GET /files?folderId=root` filters to root, including cursor pagination. Cross-tenant folder/file IDs are rejected with 404. Folder deletion detaches contained files and pending resumable uploads in a transaction.
-
-### v2.5.0 implementation review (DRAFT, not released)
-
-The working branch under [draft PR #88](https://github.com/wbizmo/vaultbox-api/pull/88) integrates v2.3 storage recovery, v2.4 security/performance/release gates and v2.5 folder/quota APIs. The GitHub and production published release remains **v2.2.0**. This branch's package/API version is **2.5.0 for review**, not an indication that v2.5.0 has shipped. A human-approved merge and final SHA-verified release are required.
-
-**Object storage provider status: UNVERIFIED / NOT CONFIGURED BY DECISION.** There will be **no S3 provider** in this review scope. The S3-compatible adapter and checksum migration tooling are included, with tests against a disposable local S3 emulator only. No real S3, object-store IAM, encryption/conditional-multipart guarantee, production object migration or cross-region durability acceptance has been performed. Do **not** mark provider-dependent acceptance of #53 satisfied or claim this deployment is multi-instance durable until an actual shared durable provider is configured and proven. Using `STORAGE_BACKEND=local` is appropriate for a **single instance with a persistent, backed-up filesystem only**; Render ephemeral local disk without verified persistence/backups is unsuitable as the sole durable storage for user files. Local tests using a shared host directory do not make local disk durable across hosts or restarts. This explicitly accepted unverified item must remain visible in PR #88 and the release readiness report.
-
-**Local-only verified engineering:** temporary-file and chunk admissions are serialized across accounts and processes against configurable global/per-account byte and concurrency budgets; one-shot streaming and resumable assemblies hold durable cleanup claims, orphan scans avoid deleting unknown legacy objects, storage-full responses are explicit, and completed file metadata is never deleted because bytes are missing. Independent Node processes test upload/abort/complete races, cross-tenant authorization, SIGKILL during streaming and after assembly, Redis and storage fault paths. The full local validation report and any remaining external gates belong in PR #88.
-
-Review references: [v2.5.0 draft release notes](./docs/RELEASE_NOTES_v2.5.0.md) · [deployment and rollback](./docs/DEPLOYMENT.md) · [PostgreSQL performance report](./docs/POSTGRES_QUERY_PROFILE.md).
