@@ -168,6 +168,24 @@ jobs:
           set -euo pipefail
           npm run benchmark:capabilities | tee capability-benchmark.json
 
+      - name: Simulate exact Render Free production-only install and migration bootstrap
+        env:
+          RENDER: "true"
+          RENDER_SERVICE_TYPE: "web"
+          VAULTBOX_RENDER_FREE_MODE: "1"
+          NODE_ENV: production
+        run: |
+          set -euo pipefail
+          # Render's existing build command uses npm install --omit=dev.
+          # Keep npm-shrinkwrap.json; it pins Prisma and all dependencies.
+          rm -rf node_modules package-lock.json
+          npm install --omit=dev --no-audit --no-fund
+          # postinstall must generate and verify Prisma even without TypeScript.
+          npm_config_offline=true node scripts/verify-build.js
+          # Free-plan startup migration must work from installed Prisma,
+          # without fetching an executable or bypassing deployment migration locks.
+          npm_config_offline=true node scripts/render-startup.js
+
       # CodeQL security-extended runs on this same runner, not a second job.
       - name: Analyze CodeQL findings
         uses: github/codeql-action/analyze@v4
