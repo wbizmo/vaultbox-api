@@ -11,7 +11,7 @@ VaultBox is a secure cloud-storage API built with Fastify, Prisma, PostgreSQL, R
 ## Live service
 
 - API: `https://vaultbox-api-ucff.onrender.com`
-- Swagger UI: `https://vaultbox-api-ucff.onrender.com/docs`
+- Swagger UI (canonical): `https://vaultbox-api-ucff.onrender.com/docs/` — index links containing tracking/query parameters redirect to this canonical URL so the generated OpenAPI 3.0.3 specification loads correctly.
 - Liveness: `https://vaultbox-api-ucff.onrender.com/health`
 - Dependency health: `https://vaultbox-api-ucff.onrender.com/infra/health`
 
