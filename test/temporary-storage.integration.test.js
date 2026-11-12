@@ -268,12 +268,15 @@ test("zero-byte assembly fences do not exhaust claim-count capacity reserved by 
   const baseline = await tempStats();
   const limits = {
     globalBytes: BigInt(baseline.reservedBytes) + 100n,
-    userBytes: 100n, globalClaims: baseline.objects + 1, userClaims: 1
+    userBytes: 100n, globalClaims: baseline.objects + 2, userClaims: 1
   };
   const owner = "assembly-cap-" + tag;
   const sessionKey = "session:" + tag;
   const assemblyKey = "assembly:" + tag;
-  t.after(() => prisma.temporaryObject.deleteMany({ where: { objectKey: { in: [sessionKey, assemblyKey] } } }));
+  const otherKey = "file:other-" + tag;
+  t.after(() => prisma.temporaryObject.deleteMany({
+    where: { objectKey: { in: [sessionKey, assemblyKey, otherKey] } }
+  }));
   await reserveTemporary({ userId: owner, objectKey: sessionKey, kind: "SESSION", bytes: 60n, limits });
   const assembly = await reserveTemporary({
     userId: owner, objectKey: assemblyKey, kind: "ASSEMBLY", bytes: 0n, limits
@@ -282,6 +285,13 @@ test("zero-byte assembly fences do not exhaust claim-count capacity reserved by 
   await assert.rejects(reserveTemporary({
     userId: owner, objectKey: "file:" + tag, kind: "FILE", bytes: 1n, limits
   }), { code: "TEMP_STORAGE_BUDGET_EXCEEDED" });
+  // A different user can consume the remaining global slot only when the
+  // already-admitted zero-byte ASSEMBLY row is filtered from count totals.
+  await reserveTemporary({
+    userId: "other-" + tag, objectKey: otherKey, kind: "FILE",
+    bytes: 1n, limits
+  });
+  await releaseTemporary(otherKey);
   await releaseTemporary(assemblyKey);
   await releaseTemporary(sessionKey);
 });
@@ -315,9 +325,17 @@ test("S3 stale claims are fenced, deleted, and verified on separate grace period
   assert.equal(first.reaped, 0);
   assert.ok(objects.has("objects/" + key));
   assert.equal((await prisma.temporaryObject.findUnique({ where: { id: claim.id } })).state, "REAPING");
+  const stillQuarantined = await reconcileStorage(storage, prisma, opts);
+  assert.equal(stillQuarantined.reaped, 0);
+  assert.ok(objects.has("objects/" + key));
+  assert.equal((await prisma.temporaryObject.findUnique({ where: { id: claim.id } })).state, "REAPING");
   await prisma.temporaryObject.update({ where: { id: claim.id }, data: { leaseUntil: old } });
   const second = await reconcileStorage(storage, prisma, opts);
   assert.equal(second.reaped, 0);
+  assert.equal(objects.has("objects/" + key), false);
+  assert.equal((await prisma.temporaryObject.findUnique({ where: { id: claim.id } })).state, "VERIFYING");
+  const stillVerifying = await reconcileStorage(storage, prisma, opts);
+  assert.equal(stillVerifying.reaped, 0);
   assert.equal(objects.has("objects/" + key), false);
   assert.equal((await prisma.temporaryObject.findUnique({ where: { id: claim.id } })).state, "VERIFYING");
   await prisma.temporaryObject.update({ where: { id: claim.id }, data: { leaseUntil: old } });

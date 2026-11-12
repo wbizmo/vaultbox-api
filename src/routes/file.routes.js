@@ -25,7 +25,7 @@ const { retryOnConflict } = require("../lib/db-retry");
 const { reserveTemporary, startTempHeartbeat, assertTemporaryOwned,
   releaseTemporary, ensurePhysicalHeadroom } = require("../lib/temporary-storage");
 const { decodeCursor, finishCursorPage } = require("../lib/pagination");
-const { filePageOrderBy, fileCursorOrderBy, fileCursorWhere } = require("../lib/file-order");
+const { fileCursorOrderBy, fileCursorWhere } = require("../lib/file-order");
 
 const fileCursorTypes = {
   createdAt: "date",
@@ -395,7 +395,7 @@ async function fileRoutes(app) {
       prisma.file.count({ where: baseWhere }),
       prisma.file.findMany({
         where: baseWhere,
-        orderBy: filePageOrderBy(sort, order),
+        orderBy: fileCursorOrderBy(sort, order),
         skip: (page - 1) * limit,
         take: limit
       })

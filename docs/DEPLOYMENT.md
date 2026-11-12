@@ -391,6 +391,18 @@ The partial index is an additive SQL-only Prisma migration `20261111011000_uploa
 ## v2.5.0 migration/review operations (not yet performed in production)
 
 - The additive stored-name index `20261112003000_file_stored_name_idx` is created with `CREATE INDEX CONCURRENTLY` and must run outside a PostgreSQL transaction block. On staging, verify the real plan uses `File_storedName_idx` for orphan/legacy lookups before the Render cutover.
+- **Recovery if the concurrent index build fails:** PostgreSQL can leave a named but **invalid** index after an interrupted `CREATE INDEX CONCURRENTLY`. `IF NOT EXISTS` alone will skip that invalid index on retry, and PostgreSQL will still incur write overhead maintaining it. Stop release rollout and check the exact state using:
+  ```sql
+  SELECT c.relname, i.indisready, i.indisvalid
+  FROM pg_class AS c
+  JOIN pg_index AS i ON i.indexrelid = c.oid
+  WHERE c.oid = to_regclass('public."File_storedName_idx"');
+  ```
+  If `indisvalid = false`, execute **outside a transaction** (with operator approval and against the correct staging/production database):
+  ```sql
+  DROP INDEX CONCURRENTLY IF EXISTS "File_storedName_idx";
+  ```
+  If Prisma recorded migration `20261112003000_file_stored_name_idx` as failed, clear that failed migration **after** examining its error: `npx prisma migrate resolve --rolled-back 20261112003000_file_stored_name_idx`. Then rerun `npx prisma migrate deploy` and verify `indisvalid = true`. Never drop a valid index, and never mark a failed migration `--applied` just to bypass the build. Document the observed DB state and rerun outcome before promotion.
 - Earlier as-yet-unreleased migrations `20261110100000_folder_aware_uploads` and `20261110110000_metadata_retention` contain ordinary index builds. **Schedule the migration stage in a low-traffic maintenance window** and monitor write locks; do not run them during high-volume uploads. Do not rewrite already applied migration checksums. Re-evaluate using standalone concurrent-index migrations if staging reveals unacceptable lock duration.
 - `DownloadToken_expiresAt_id_idx` may overlap an existing single-column `expiresAt` index; measure index size, write cost and query plans before removing any old index (not in this release).
 - A completed CodeQL workflow is **not** proof that no code-scanning alerts remain. Require manual inspection of open CodeQL alerts and CodeRabbit review threads; establish a repository code-scanning branch-protection/ruleset policy in GitHub Settings before approval. The connector cannot currently enforce that repository setting.

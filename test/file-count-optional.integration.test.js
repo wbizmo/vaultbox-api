@@ -115,6 +115,28 @@ test("optional total count preserves old metadata by default and never reveals o
     assert.equal(response.statusCode, 200, response.body);
     return response.json();
   };
+  // Identical sort values expose nondeterministic LIMIT/OFFSET when
+  // includeTotal=true does not apply the same stable id tie-breaker.
+  const tied = ["z", "a"].map(letter => "sort-" + letter + "-" + tag);
+  const tiedTimestamp = new Date("2026-01-01T00:00:00Z");
+  for (const id of tied) {
+    await prisma.file.create({ data: {
+      id, userId: owner.id, originalName: "AAA identical sort.bin",
+      storedName: crypto.randomUUID(), mimeType: "application/octet-stream",
+      path: crypto.randomUUID(), size: 2n,
+      createdAt: tiedTimestamp, updatedAt: tiedTimestamp,
+      folderId: null, status: "ACTIVE"
+    } });
+  }
+  const countedTie = await get("limit=1&sort=originalName&order=asc");
+  const countFreeTie = await get("limit=1&sort=originalName&order=asc&includeTotal=false");
+  assert.deepEqual(countedTie.files.map(f => f.id), [tied[1]]);
+  assert.deepEqual(countFreeTie.files.map(f => f.id), [tied[1]]);
+  const countedSecond = await get("limit=1&page=2&sort=originalName&order=asc");
+  const noCountSecond = await get("limit=1&page=2&sort=originalName&order=asc&includeTotal=false");
+  assert.deepEqual(countedSecond.files.map(f => f.id), [tied[0]]);
+  assert.deepEqual(noCountSecond.files.map(f => f.id), [tied[0]]);
+
   const oldFolders = await getExtra("/folders?limit=1");
   const optimizedFolders = await getExtra("/folders?limit=1&includeTotal=false");
   assert.equal(oldFolders.pagination.total, 2);
